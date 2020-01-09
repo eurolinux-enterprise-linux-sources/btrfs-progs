@@ -1,17 +1,16 @@
 Name:           btrfs-progs
-Version:        0.19
-Release:        12%{?dist}
+Version:        0.20
+%define _commit git91d9eec
+Release:        0.2.%{_commit}%{?dist}
 Summary:        Userspace programs for btrfs
 
 Group:          System Environment/Base
 License:        GPLv2
 URL:            http://btrfs.wiki.kernel.org/index.php/Main_Page
 ExclusiveArch:  x86_64
-Source0:        http://www.kernel.org/pub/linux/kernel/people/mason/btrfs/%{name}-%{version}.tar.bz2
+Source0:        %{name}-%{version}-rc1-%{_commit}.tar.bz2
 Patch0: btrfs-progs-fix-labels.patch
-Patch1: btrfs-progs-valgrind.patch
-Patch2: btrfs-progs-upstream.patch
-Patch3: btrfs-progs-build-everything.patch
+Patch1: btrfs-update-version.patch
 
 BuildRoot:      %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 
@@ -24,15 +23,12 @@ The btrfs-progs package provides all the userpsace programs needed to create,
 check, modify and correct any inconsistencies in the btrfs filesystem.
 
 %prep
-%setup -q
+%setup -q -n btrfs-progs-%{version}-rc1-%{_commit}
 %patch0 -p1
 %patch1 -p1
-%patch2 -p1
-%patch3 -p1
 
 %build
-make CFLAGS="$RPM_OPT_FLAGS" %{?_smp_mflags}
-make CFLAGS="$RPM_OPT_FLAGS" %{?_smp_mflags} convert
+make CFLAGS="$RPM_OPT_FLAGS -fno-strict-aliasing" %{?_smp_mflags}
 
 %install
 rm -rf $RPM_BUILD_ROOT
@@ -55,6 +51,9 @@ rm -rf $RPM_BUILD_ROOT
 %{_root_sbindir}/btrfstune
 %{_root_sbindir}/btrfs-map-logical
 %{_root_sbindir}/btrfs
+%{_root_sbindir}/btrfs-find-root
+%{_root_sbindir}/btrfs-restore
+%{_root_sbindir}/btrfs-zero-log
 %{_mandir}/man8/btrfs-image.8.gz
 %{_mandir}/man8/btrfs-show.8.gz
 %{_mandir}/man8/btrfsck.8.gz
@@ -63,6 +62,12 @@ rm -rf $RPM_BUILD_ROOT
 %{_mandir}/man8/btrfs.8.gz
 
 %changelog
+* Mon Oct 15 2012 Zach Brown <zab@redhat.com> 0.20-0.2.git91d9eec
+- bring btrfs-progs uptodate with current upstream git
+- updated patch to allow fs labels with slashes
+- btrfs-find-root, btrfs-restore, and btrfs-zero-log are now available
+- build with -fno-strict-aliasing
+
 * Mon Jan 10 2011 Josef Bacik <josef@redhat.com> 0.19-12
 - bring btrfs-progs uptodate with latest upstream, Resolves: rhbz#645741
 

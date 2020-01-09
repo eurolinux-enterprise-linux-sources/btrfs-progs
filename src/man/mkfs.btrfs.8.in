@@ -1,21 +1,25 @@
 .TH MKFS.BTRFS 8
 .SH NAME
-mkfs.btrfs \- create an btrfs filesystem
+mkfs.btrfs \- create a btrfs filesystem
 .SH SYNOPSIS
 .B mkfs.btrfs
 [ \fB\-A\fP\fI alloc-start\fP ]
 [ \fB\-b\fP\fI byte-count\fP ]
-[ \fB \-d\fP\fI data-profile\fP ]
-[ \fB \-l\fP\fI leafsize\fP ]
-[ \fB \-L\fP\fI label\fP ]
-[ \fB \-m\fP\fI metadata profile\fP ]
-[ \fB \-n\fP\fI nodesize\fP ]
-[ \fB \-s\fP\fI sectorsize\fP ]
-[ \fB \-h\fP ]
-[ \fB \-V\fP ] \fI device\fP [ \fI device ...\fP ]
+[ \fB\-d\fP\fI data-profile\fP ]
+[ \fB\-l\fP\fI leafsize\fP ]
+[ \fB\-L\fP\fI label\fP ]
+[ \fB\-m\fP\fI metadata profile\fP ]
+[ \fB\-M\fP\fI mixed data+metadata\fP ]
+[ \fB\-n\fP\fI nodesize\fP ]
+[ \fB\-s\fP\fI sectorsize\fP ]
+[ \fB\-r\fP\fI rootdir\fP ]
+[ \fB\-K\fP ]
+[ \fB\-h\fP ]
+[ \fB\-V\fP ]
+\fI device\fP [ \fIdevice ...\fP ]
 .SH DESCRIPTION
 .B mkfs.btrfs
-is used to create an btrfs filesystem (usually in a disk partition, or an array
+is used to create a btrfs filesystem (usually in a disk partition, or an array
 of disk partitions).
 .I device
 is the special file corresponding to the device (e.g \fI/dev/sdXX\fP ).
@@ -45,11 +49,23 @@ Specify a label for the filesystem.
 Specify how metadata must be spanned across the devices specified. Valid
 values are raid0, raid1, raid10 or single.
 .TP
+\fB\-M\fR, \fB\-\-mixed\fR
+Mix data and metadata chunks together for more efficient space 
+utilization.  This feature incurs a performance penalty in
+larger filesystems.  It is recommended for use with filesystems
+of 1 GiB or smaller.
+.TP
 \fB\-n\fR, \fB\-\-nodesize \fIsize\fR
 Specify the nodesize. By default the value is set to the pagesize.
 .TP
 \fB\-s\fR, \fB\-\-sectorsize \fIsize\fR
 Specify the sectorsize, the minimum block allocation.
+.TP
+\fB\-r\fR, \fB\-\-rootdir \fIrootdir\fR
+Specify a directory to copy into the newly created fs.
+.TP
+\fB\-K\fR, \fB\-\-nodiscard \fR
+Do not perform whole device TRIM operation by default.
 .TP
 \fB\-V\fR, \fB\-\-version\fR
 Print the \fBmkfs.btrfs\fP version and exit.

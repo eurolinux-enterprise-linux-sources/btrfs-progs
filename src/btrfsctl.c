@@ -29,6 +29,7 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <libgen.h>
+#include <stdlib.h>
 #include "kerncompat.h"
 #include "ctree.h"
 #include "transaction.h"
@@ -46,7 +47,7 @@ static inline int ioctl(int fd, int define, void *arg) { return 0; }
 static void print_usage(void)
 {
 	printf("usage: btrfsctl [ -d file|dir] [ -s snap_name subvol|tree ]\n");
-	printf("                [-r size] [-A device] [-a] [-c]\n");
+	printf("                [-r size] [-A device] [-a] [-c] [-D dir .]\n");
 	printf("\t-d filename: defragments one file\n");
 	printf("\t-d directory: defragments the entire Btree\n");
 	printf("\t-s snap_name dir: creates a new snapshot of dir\n");
@@ -55,6 +56,9 @@ static void print_usage(void)
 	printf("\t-A device: scans the device file for a Btrfs filesystem\n");
 	printf("\t-a: scans all devices for Btrfs filesystems\n");
 	printf("\t-c: forces a single FS sync\n");
+	printf("\t-D: delete snapshot\n");
+	printf("\t-m [tree id] directory: set the default mounted subvolume"
+	       " to the [tree id] or the directory\n");
 	printf("%s\n", BTRFS_BUILD_VERSION);
 	exit(1);
 }
@@ -99,8 +103,15 @@ int main(int ac, char **av)
 	int i;
 	unsigned long command = 0;
 	int len;
+	char *pos;
 	char *fullpath;
+	u64 objectid = 0;
 
+	printf( "**\n"
+		"** WARNING: this program is considered deprecated\n"
+		"** Please consider to switch to the btrfs utility\n"
+		"**\n");
+	
 	if (ac == 2 && strcmp(av[1], "-a") == 0) {
 		fprintf(stderr, "Scanning for Btrfs filesystems\n");
 		btrfs_scan_one_dir("/dev", 1);
@@ -158,6 +169,28 @@ int main(int ac, char **av)
 				print_usage();
 			}
 			command = BTRFS_IOC_DEFRAG;
+		} else if (strcmp(av[i], "-D") == 0) {
+			if (i >= ac - 1) {
+				fprintf(stderr, "-D requires an arg\n");
+				print_usage();
+			}
+			command = BTRFS_IOC_SNAP_DESTROY;
+			name = av[i + 1];
+			len = strlen(name);
+			pos = strchr(name, '/');
+			if (pos) {
+				if (*(pos + 1) == '\0')
+					*(pos) = '\0';
+				else {
+					fprintf(stderr,
+						"error: / not allowed in names\n");
+					exit(1);
+				}
+			}
+			if (len == 0 || len >= BTRFS_VOL_NAME_MAX) {
+				fprintf(stderr, "-D size too long\n");
+				exit(1);
+			}
 		} else if (strcmp(av[i], "-A") == 0) {
 			if (i >= ac - 1) {
 				fprintf(stderr, "-A requires an arg\n");
@@ -178,6 +211,16 @@ int main(int ac, char **av)
 			command = BTRFS_IOC_RESIZE;
 		} else if (strcmp(av[i], "-c") == 0) {
 			command = BTRFS_IOC_SYNC;
+		} else if (strcmp(av[i], "-m") == 0) {
+			command = BTRFS_IOC_DEFAULT_SUBVOL;
+			if (i == ac - 3) {
+				objectid = (unsigned long long)
+					    strtoll(av[i + 1], NULL, 0);
+				if (errno == ERANGE) {
+					fprintf(stderr, "invalid tree id\n");
+					exit(1);
+				}
+			}
 		}
 	}
 	if (command == 0) {
@@ -198,14 +241,18 @@ int main(int ac, char **av)
 		fd = open_file_or_dir(fname);
 	 }
 
-	if (name)
-		strcpy(args.name, name);
-	else
+	if (name) {
+                strncpy(args.name, name, BTRFS_PATH_NAME_MAX + 1);
+                args.name[BTRFS_PATH_NAME_MAX] = 0;
+	} else
 		args.name[0] = '\0';
 
 	if (command == BTRFS_IOC_SNAP_CREATE) {
 		args.fd = fd;
 		ret = ioctl(snap_fd, command, &args);
+	} else if (command == BTRFS_IOC_DEFAULT_SUBVOL) {
+		printf("objectid is %llu\n", (unsigned long long)objectid);
+		ret = ioctl(fd, command, &objectid);
 	} else
 		ret = ioctl(fd, command, &args);
 	if (ret < 0) {
@@ -219,8 +266,8 @@ int main(int ac, char **av)
 	}
 	printf("%s\n", BTRFS_BUILD_VERSION);
 	if (ret)
-		exit(0);
-	else
 		exit(1);
+
+	return 0;
 }
 
