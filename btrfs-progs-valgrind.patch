@@ -91,38 +91,6 @@ index addebe1..4d4e902 100644
  	return 0;
  }
  
-@@ -970,25 +976,26 @@ int close_ctree(struct btrfs_root *root)
- 	if (fs_info->csum_root->node)
- 		free_extent_buffer(fs_info->csum_root->node);
- 
--	if (root->fs_info->log_root_tree) {
--		if (root->fs_info->log_root_tree->node)
--			free_extent_buffer(root->fs_info->log_root_tree->node);
--		free(root->fs_info->log_root_tree);
-+	if (fs_info->log_root_tree) {
-+		if (fs_info->log_root_tree->node)
-+			free_extent_buffer(fs_info->log_root_tree->node);
- 	}
- 
--	close_all_devices(root->fs_info);
-+	close_all_devices(fs_info);
- 	extent_io_tree_cleanup(&fs_info->extent_cache);
- 	extent_io_tree_cleanup(&fs_info->free_space_cache);
- 	extent_io_tree_cleanup(&fs_info->block_group_cache);
- 	extent_io_tree_cleanup(&fs_info->pinned_extents);
- 	extent_io_tree_cleanup(&fs_info->pending_del);
- 	extent_io_tree_cleanup(&fs_info->extent_ins);
-+	btrfs_mapping_tree_free(&fs_info->mapping_tree);
- 
- 	free(fs_info->tree_root);
- 	free(fs_info->extent_root);
- 	free(fs_info->chunk_root);
- 	free(fs_info->dev_root);
- 	free(fs_info->csum_root);
-+	free(fs_info->log_root_tree);
- 	free(fs_info);
- 
- 	return 0;
 diff --git a/extent-cache.c b/extent-cache.c
 index b871e18..b424975 100644
 --- a/extent-cache.c

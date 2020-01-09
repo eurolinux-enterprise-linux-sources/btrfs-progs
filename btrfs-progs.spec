@@ -1,6 +1,6 @@
 Name:           btrfs-progs
 Version:        0.19
-Release:        11%{?dist}
+Release:        12%{?dist}
 Summary:        Userspace programs for btrfs
 
 Group:          System Environment/Base
@@ -9,10 +9,9 @@ URL:            http://btrfs.wiki.kernel.org/index.php/Main_Page
 ExclusiveArch:  x86_64
 Source0:        http://www.kernel.org/pub/linux/kernel/people/mason/btrfs/%{name}-%{version}.tar.bz2
 Patch0: btrfs-progs-fix-labels.patch
-Patch1: btrfs-progs-build-everything.patch
-Patch2: btrfs-progs-valgrind.patch
-Patch3: btrfs-progs-upstream.patch
-Patch4: btrfs-progs-compile-fix.patch
+Patch1: btrfs-progs-valgrind.patch
+Patch2: btrfs-progs-upstream.patch
+Patch3: btrfs-progs-build-everything.patch
 
 BuildRoot:      %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 
@@ -30,7 +29,6 @@ check, modify and correct any inconsistencies in the btrfs filesystem.
 %patch1 -p1
 %patch2 -p1
 %patch3 -p1
-%patch4 -p1
 
 %build
 make CFLAGS="$RPM_OPT_FLAGS" %{?_smp_mflags}
@@ -55,13 +53,19 @@ rm -rf $RPM_BUILD_ROOT
 %{_root_sbindir}/btrfs-vol
 %{_root_sbindir}/btrfs-convert
 %{_root_sbindir}/btrfstune
+%{_root_sbindir}/btrfs-map-logical
+%{_root_sbindir}/btrfs
 %{_mandir}/man8/btrfs-image.8.gz
 %{_mandir}/man8/btrfs-show.8.gz
 %{_mandir}/man8/btrfsck.8.gz
 %{_mandir}/man8/btrfsctl.8.gz
 %{_mandir}/man8/mkfs.btrfs.8.gz
+%{_mandir}/man8/btrfs.8.gz
 
 %changelog
+* Mon Jan 10 2011 Josef Bacik <josef@redhat.com> 0.19-12
+- bring btrfs-progs uptodate with latest upstream, Resolves: rhbz#645741
+
 * Mon Jun  7 2010 Josef Bacik <josef@redhat.com> 0.19-11
 - fix btrfs-progs so it only buils on x86_64, Resolves: rhbz#596690
 
