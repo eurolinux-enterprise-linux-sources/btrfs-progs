@@ -33,6 +33,7 @@ btrfs-zero-log
 btrfs-corrupt-block
 btrfs-select-super
 btrfs-calc-size
+btrfs-crc
 btrfstune
 libbtrfs.a
 libbtrfs.so
@@ -42,7 +43,9 @@ library-test
 library-test-static
 
 /tests/*-tests-results.txt
+/tests/test-console.txt
 /tests/test.img
+/tests/mnt/
 
 aclocal.m4
 autom4te.cache
@@ -61,9 +64,9 @@ config/py-compile
 config/test-driver
 configure
 cscope.out
+.clang_complete
 depcomp
 libtool
-m4/*.m4
 Makefile
 Documentation/Makefile
 missing
