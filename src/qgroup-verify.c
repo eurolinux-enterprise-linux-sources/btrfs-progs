@@ -28,6 +28,7 @@
 #include "print-tree.h"
 #include "utils.h"
 #include "ulist.h"
+#include "rbtree-utils.h"
 
 #include "qgroup-verify.h"
 
@@ -512,7 +513,7 @@ static int travel_tree(struct btrfs_fs_info *info, struct btrfs_root *root,
 //	       bytenr, num_bytes, ref_parent);
 
 	eb = read_tree_block(root, bytenr, num_bytes, 0);
-	if (!eb)
+	if (!extent_buffer_uptodate(eb))
 		return -EIO;
 
 	ret = 0;
@@ -552,11 +553,11 @@ static int add_refs_for_implied(struct btrfs_fs_info *info, u64 bytenr,
 				struct tree_block *block)
 {
 	int ret;
-	u64 root_bytenr = resolve_one_root(bytenr);
+	u64 root_id = resolve_one_root(bytenr);
 	struct btrfs_root *root;
 	struct btrfs_key key;
 
-	key.objectid = root_bytenr;
+	key.objectid = root_id;
 	key.type = BTRFS_ROOT_ITEM_KEY;
 	key.offset = (u64)-1;
 

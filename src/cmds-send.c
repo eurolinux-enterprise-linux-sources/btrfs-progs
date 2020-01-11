@@ -16,7 +16,6 @@
  * Boston, MA 021110-1307, USA.
  */
 
-#define _GNU_SOURCE
 
 #include "kerncompat.h"
 
@@ -172,11 +171,16 @@ out:
 	return ret;
 }
 
-static void add_clone_source(struct btrfs_send *s, u64 root_id)
+static int add_clone_source(struct btrfs_send *s, u64 root_id)
 {
 	s->clone_sources = realloc(s->clone_sources,
 		sizeof(*s->clone_sources) * (s->clone_sources_count + 1));
+
+	if (!s->clone_sources)
+		return -ENOMEM;
 	s->clone_sources[s->clone_sources_count++] = root_id;
+
+	return 0;
 }
 
 static int write_buf(int fd, const void *buf, int size)
@@ -427,7 +431,7 @@ int cmd_send(int argc, char **argv)
 	u32 i;
 	char *mount_root = NULL;
 	char *snapshot_parent = NULL;
-	u64 root_id;
+	u64 root_id = 0;
 	u64 parent_root_id = 0;
 	int full_send = 1;
 	int new_end_cmd_semantic = 0;
@@ -475,7 +479,11 @@ int cmd_send(int argc, char **argv)
 				goto out;
 			}
 
-			add_clone_source(&send, root_id);
+			ret = add_clone_source(&send, root_id);
+			if (ret < 0) {
+				fprintf(stderr, "ERROR: not enough memory\n");
+				goto out;
+			}
 			subvol_uuid_search_finit(&send.sus);
 			free(subvol);
 			subvol = NULL;
@@ -575,7 +583,11 @@ int cmd_send(int argc, char **argv)
 			goto out;
 		}
 
-		add_clone_source(&send, parent_root_id);
+		ret = add_clone_source(&send, parent_root_id);
+		if (ret < 0) {
+			fprintf(stderr, "ERROR: not enough memory\n");
+			goto out;
+		}
 	}
 
 	for (i = optind; i < argc; i++) {
@@ -671,7 +683,11 @@ int cmd_send(int argc, char **argv)
 			goto out;
 
 		/* done with this subvol, so add it to the clone sources */
-		add_clone_source(&send, root_id);
+		ret = add_clone_source(&send, root_id);
+		if (ret < 0) {
+			fprintf(stderr, "ERROR: not enough memory\n");
+			goto out;
+		}
 
 		parent_root_id = 0;
 		full_send = 0;

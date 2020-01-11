@@ -16,7 +16,6 @@
  * Boston, MA 021110-1307, USA.
  */
 
-#define _GNU_SOURCE
 #include <sys/ioctl.h>
 #include <sys/mount.h>
 #include "ioctl.h"
@@ -33,6 +32,7 @@
 #include "utils.h"
 #include <uuid/uuid.h>
 #include "btrfs-list.h"
+#include "rbtree-utils.h"
 
 #define BTRFS_LIST_NFILTERS_INCREASE	(2 * BTRFS_LIST_FILTER_MAX)
 #define BTRFS_LIST_NCOMPS_INCREASE	(2 * BTRFS_LIST_COMP_MAX)
@@ -1710,7 +1710,7 @@ int btrfs_list_find_updated_files(int fd, u64 root_id, u64 oldest_gen)
 		ret = ioctl(fd, BTRFS_IOC_TREE_SEARCH, &args);
 		e = errno;
 		if (ret < 0) {
-			fprintf(stderr, "ERROR: can't perform the search- %s\n",
+			fprintf(stderr, "ERROR: can't perform the search - %s\n",
 				strerror(e));
 			break;
 		}
@@ -1910,7 +1910,7 @@ int btrfs_list_get_path_rootid(int fd, u64 *treeid)
 	ret = ioctl(fd, BTRFS_IOC_INO_LOOKUP, &args);
 	if (ret < 0) {
 		fprintf(stderr,
-			"ERROR: can't perform the search -%s\n",
+			"ERROR: can't perform the search - %s\n",
 			strerror(errno));
 		return ret;
 	}

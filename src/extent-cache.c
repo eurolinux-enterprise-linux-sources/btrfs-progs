@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include "kerncompat.h"
 #include "extent-cache.h"
+#include "rbtree-utils.h"
 
 struct cache_extent_search_range {
 	u64 objectid;
@@ -223,6 +224,15 @@ struct cache_extent *search_cache_extent2(struct cache_tree *tree,
 struct cache_extent *first_cache_extent(struct cache_tree *tree)
 {
 	struct rb_node *node = rb_first(&tree->root);
+
+	if (!node)
+		return NULL;
+	return rb_entry(node, struct cache_extent, rb_node);
+}
+
+struct cache_extent *last_cache_extent(struct cache_tree *tree)
+{
+	struct rb_node *node = rb_last(&tree->root);
 
 	if (!node)
 		return NULL;

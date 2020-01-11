@@ -16,8 +16,8 @@
  * Boston, MA 021110-1307, USA.
  */
 
-#ifndef __BTRFS_FREE_SPACE_CACHE
-#define __BTRFS_FREE_SPACE_CACHE
+#ifndef __BTRFS_FREE_SPACE_CACHE_H__
+#define __BTRFS_FREE_SPACE_CACHE_H__
 
 struct btrfs_free_space {
 	struct rb_node offset_index;
@@ -36,6 +36,7 @@ struct btrfs_free_space_ctl {
 	int unit;
 	u64 start;
 	void *private;
+	u32 sectorsize;
 };
 
 int load_free_space_cache(struct btrfs_fs_info *fs_info,

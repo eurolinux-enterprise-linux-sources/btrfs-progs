@@ -16,9 +16,6 @@
  * Boston, MA 021110-1307, USA.
  */
 
-#define _XOPEN_SOURCE 500
-#define _GNU_SOURCE
-
 #include "kerncompat.h"
 
 #include <sys/ioctl.h>
@@ -35,6 +32,8 @@
 #include <uuid/uuid.h>
 #include <ctype.h>
 #include <sys/xattr.h>
+#include <limits.h>
+#include <linux/limits.h>
 #include <blkid/blkid.h>
 #include <ftw.h>
 #include "ctree.h"
@@ -42,13 +41,11 @@
 #include "volumes.h"
 #include "transaction.h"
 #include "utils.h"
-#include "version.h"
 
 static u64 index_cnt = 2;
 
-#define DEFAULT_MKFS_FEATURES	(BTRFS_FEATURE_INCOMPAT_EXTENDED_IREF)
-
-#define DEFAULT_MKFS_LEAF_SIZE 16384
+#define DEFAULT_MKFS_FEATURES	(BTRFS_FEATURE_INCOMPAT_EXTENDED_IREF \
+		| BTRFS_FEATURE_INCOMPAT_SKINNY_METADATA)
 
 struct directory_name_entry {
 	char *dir_name;
@@ -275,29 +272,29 @@ static void print_usage(void)
 {
 	fprintf(stderr, "usage: mkfs.btrfs [options] dev [ dev ... ]\n");
 	fprintf(stderr, "options:\n");
-	fprintf(stderr, "\t -A --alloc-start the offset to start the FS\n");
-	fprintf(stderr, "\t -b --byte-count total number of bytes in the FS\n");
-	fprintf(stderr, "\t -d --data data profile, raid0, raid1, raid5, raid6, raid10, dup or single\n");
-	fprintf(stderr, "\t -f --force force overwrite of existing filesystem\n");
-	fprintf(stderr, "\t -l --leafsize size of btree leaves\n");
-	fprintf(stderr, "\t -L --label set a label\n");
-	fprintf(stderr, "\t -m --metadata metadata profile, values like data profile\n");
-	fprintf(stderr, "\t -M --mixed mix metadata and data together\n");
-	fprintf(stderr, "\t -n --nodesize size of btree nodes\n");
-	fprintf(stderr, "\t -s --sectorsize min block allocation (may not mountable by current kernel)\n");
-	fprintf(stderr, "\t -r --rootdir the source directory\n");
-	fprintf(stderr, "\t -K --nodiscard do not perform whole device TRIM\n");
-	fprintf(stderr, "\t -O --features comma separated list of filesystem features\n");
-	fprintf(stderr, "\t -U --uuid specify the filesystem UUID\n");
-	fprintf(stderr, "\t -V --version print the mkfs.btrfs version and exit\n");
-	fprintf(stderr, "%s\n", BTRFS_BUILD_VERSION);
+	fprintf(stderr, "\t-A|--alloc-start START  the offset to start the FS\n");
+	fprintf(stderr, "\t-b|--byte-count SIZE    total number of bytes in the FS\n");
+	fprintf(stderr, "\t-d|--data PROFILE       data profile, raid0, raid1, raid5, raid6, raid10, dup or single\n");
+	fprintf(stderr, "\t-f|--force              force overwrite of existing filesystem\n");
+	fprintf(stderr, "\t-l|--leafsize SIZE      deprecated, alias for nodesize\n");
+	fprintf(stderr, "\t-L|--label LABEL        set a label\n");
+	fprintf(stderr, "\t-m|--metadata PROFILE   metadata profile, values like data profile\n");
+	fprintf(stderr, "\t-M|--mixed              mix metadata and data together\n");
+	fprintf(stderr, "\t-n|--nodesize SIZE      size of btree nodes\n");
+	fprintf(stderr, "\t-s|--sectorsize SIZE    min block allocation (may not mountable by current kernel)\n");
+	fprintf(stderr, "\t-r|--rootdir DIR        the source directory\n");
+	fprintf(stderr, "\t-K|--nodiscard          do not perform whole device TRIM\n");
+	fprintf(stderr, "\t-O|--features LIST      comma separated list of filesystem features\n");
+	fprintf(stderr, "\t-U|--uuid UUID          specify the filesystem UUID\n");
+	fprintf(stderr, "\t-V|--version            print the mkfs.btrfs version and exit\n");
+	fprintf(stderr, "%s\n", PACKAGE_STRING);
 	exit(1);
 }
 
 static void print_version(void) __attribute__((noreturn));
 static void print_version(void)
 {
-	fprintf(stderr, "mkfs.btrfs, part of %s\n", BTRFS_BUILD_VERSION);
+	fprintf(stderr, "mkfs.btrfs, part of %s\n", PACKAGE_STRING);
 	exit(0);
 }
 
@@ -336,25 +333,6 @@ static char *parse_label(char *input)
 	}
 	return strdup(input);
 }
-
-static struct option long_options[] = {
-	{ "alloc-start", 1, NULL, 'A'},
-	{ "byte-count", 1, NULL, 'b' },
-	{ "force", 0, NULL, 'f' },
-	{ "leafsize", 1, NULL, 'l' },
-	{ "label", 1, NULL, 'L'},
-	{ "metadata", 1, NULL, 'm' },
-	{ "mixed", 0, NULL, 'M' },
-	{ "nodesize", 1, NULL, 'n' },
-	{ "sectorsize", 1, NULL, 's' },
-	{ "data", 1, NULL, 'd' },
-	{ "version", 0, NULL, 'V' },
-	{ "rootdir", 1, NULL, 'r' },
-	{ "nodiscard", 0, NULL, 'K' },
-	{ "features", 1, NULL, 'O' },
-	{ "uuid", required_argument, NULL, 'U' },
-	{ NULL, 0, NULL, 0}
-};
 
 static int add_directory_items(struct btrfs_trans_handle *trans,
 			       struct btrfs_root *root, u64 objectid,
@@ -1077,27 +1055,6 @@ static int zero_output_file(int out_fd, u64 size, u32 sectorsize)
 	return ret;
 }
 
-static int check_leaf_or_node_size(u32 size, u32 sectorsize)
-{
-	if (size < sectorsize) {
-		fprintf(stderr,
-			"Illegal leafsize (or nodesize) %u (smaller than %u)\n",
-			size, sectorsize);
-		return -1;
-	} else if (size > BTRFS_MAX_METADATA_BLOCKSIZE) {
-		fprintf(stderr,
-			"Illegal leafsize (or nodesize) %u (larger than %u)\n",
-			size, BTRFS_MAX_METADATA_BLOCKSIZE);
-		return -1;
-	} else if (size & (sectorsize - 1)) {
-		fprintf(stderr,
-			"Illegal leafsize (or nodesize) %u (not align to %u)\n",
-			size, sectorsize);
-		return -1;
-	}
-	return 0;
-}
-
 static int is_ssd(const char *file)
 {
 	blkid_probe probe;
@@ -1250,12 +1207,12 @@ int main(int ac, char **av)
 	u64 alloc_start = 0;
 	u64 metadata_profile = 0;
 	u64 data_profile = 0;
-	u32 leafsize = max_t(u32, sysconf(_SC_PAGESIZE), DEFAULT_MKFS_LEAF_SIZE);
+	u32 leafsize = max_t(u32, sysconf(_SC_PAGESIZE),
+			BTRFS_MKFS_DEFAULT_NODE_SIZE);
 	u32 sectorsize = 4096;
 	u32 nodesize = leafsize;
 	u32 stripesize = 4096;
 	int zero_end = 1;
-	int option_index = 0;
 	int fd;
 	int ret;
 	int i;
@@ -1280,6 +1237,26 @@ int main(int ac, char **av)
 
 	while(1) {
 		int c;
+		int option_index = 0;
+		static const struct option long_options[] = {
+			{ "alloc-start", 1, NULL, 'A'},
+			{ "byte-count", 1, NULL, 'b' },
+			{ "force", 0, NULL, 'f' },
+			{ "leafsize", 1, NULL, 'l' },
+			{ "label", 1, NULL, 'L'},
+			{ "metadata", 1, NULL, 'm' },
+			{ "mixed", 0, NULL, 'M' },
+			{ "nodesize", 1, NULL, 'n' },
+			{ "sectorsize", 1, NULL, 's' },
+			{ "data", 1, NULL, 'd' },
+			{ "version", 0, NULL, 'V' },
+			{ "rootdir", 1, NULL, 'r' },
+			{ "nodiscard", 0, NULL, 'K' },
+			{ "features", 1, NULL, 'O' },
+			{ "uuid", required_argument, NULL, 'U' },
+			{ NULL, 0, NULL, 0}
+		};
+
 		c = getopt_long(ac, av, "A:b:fl:n:s:m:d:L:O:r:U:VMK",
 				long_options, &option_index);
 		if (c < 0)
@@ -1360,9 +1337,9 @@ int main(int ac, char **av)
 		}
 	}
 	sectorsize = max(sectorsize, (u32)sysconf(_SC_PAGESIZE));
-	if (check_leaf_or_node_size(leafsize, sectorsize))
+	if (btrfs_check_node_or_leaf_size(leafsize, sectorsize))
 		exit(1);
-	if (check_leaf_or_node_size(nodesize, sectorsize))
+	if (btrfs_check_node_or_leaf_size(nodesize, sectorsize))
 		exit(1);
 	saved_optind = optind;
 	dev_cnt = ac - optind;
@@ -1441,7 +1418,7 @@ int main(int ac, char **av)
 		if (!leaf_forced) {
 			leafsize = best_leafsize;
 			nodesize = best_leafsize;
-			if (check_leaf_or_node_size(leafsize, sectorsize))
+			if (btrfs_check_node_or_leaf_size(leafsize, sectorsize))
 				exit(1);
 		}
 		if (leafsize != sectorsize) {
@@ -1489,8 +1466,8 @@ int main(int ac, char **av)
 	}
 
 	/* if we are here that means all devs are good to btrfsify */
-	printf("%s\n", BTRFS_BUILD_VERSION);
-	printf("See http://btrfs.wiki.kernel.org for more information.\n\n");
+	printf("%s\n", PACKAGE_STRING);
+	printf("See %s for more information.\n\n", PACKAGE_URL);
 
 	dev_cnt--;
 
@@ -1588,10 +1565,10 @@ int main(int ac, char **av)
 
 	trans = btrfs_start_transaction(root, 1);
 
+	btrfs_register_one_device(file);
+
 	if (dev_cnt == 0)
 		goto raid_groups;
-
-	btrfs_register_one_device(file);
 
 	while (dev_cnt-- > 0) {
 		int old_mixed = mixed;

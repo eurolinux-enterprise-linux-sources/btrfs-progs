@@ -16,8 +16,8 @@
  * Boston, MA 021110-1307, USA.
  */
 
-#ifndef __BTRFS_VOLUMES_
-#define __BTRFS_VOLUMES_
+#ifndef __BTRFS_VOLUMES_H__
+#define __BTRFS_VOLUMES_H__
 
 #define BTRFS_STRIPE_LEN	(64 * 1024)
 
@@ -38,6 +38,8 @@ struct btrfs_device {
 	char *label;
 	u64 total_devs;
 	u64 super_bytes_used;
+
+	u64 generation;
 
 	/* the internal btrfs device id */
 	u64 devid;

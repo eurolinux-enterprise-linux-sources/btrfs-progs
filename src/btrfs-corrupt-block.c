@@ -16,8 +16,6 @@
  * Boston, MA 021110-1307, USA.
  */
 
-#define _XOPEN_SOURCE 500
-#define _GNU_SOURCE 1
 #include <stdio.h>
 #include <stdlib.h>
 #include <fcntl.h>
@@ -30,7 +28,6 @@
 #include "print-tree.h"
 #include "transaction.h"
 #include "list.h"
-#include "version.h"
 #include "utils.h"
 
 #define FIELD_BUF_LEN 80
@@ -108,6 +105,11 @@ static void print_usage(void)
 	fprintf(stderr, "\t-K The key to corrupt in the format "
 		"<num>,<num>,<num> (must also specify -f for the field)\n");
 	fprintf(stderr, "\t-f The field in the item to corrupt\n");
+	fprintf(stderr, "\t-I An item to corrupt (must also specify the field "
+		"to corrupt and a root+key for the item)\n");
+	fprintf(stderr, "\t-D Corrupt a dir item, must specify key and field\n");
+	fprintf(stderr, "\t-d Delete this item (must specify -K)\n");
+	fprintf(stderr, "\t-r Operate on this root (only works with -d)\n");
 	exit(1);
 }
 
@@ -156,7 +158,7 @@ static int corrupt_keys_in_block(struct btrfs_root *root, u64 bytenr)
 	struct extent_buffer *eb;
 
 	eb = read_tree_block(root, bytenr, root->leafsize, 0);
-	if (!eb)
+	if (!extent_buffer_uptodate(eb))
 		return -EIO;;
 
 	corrupt_keys(NULL, root, eb);
@@ -284,7 +286,7 @@ static void btrfs_corrupt_extent_tree(struct btrfs_trans_handle *trans,
 		next = read_tree_block(root, btrfs_node_blockptr(eb, i),
 				       root->leafsize,
 				       btrfs_node_ptr_generation(eb, i));
-		if (!next)
+		if (!extent_buffer_uptodate(next))
 			continue;
 		btrfs_corrupt_extent_tree(trans, root, next);
 		free_extent_buffer(next);
@@ -301,9 +303,21 @@ enum btrfs_file_extent_field {
 	BTRFS_FILE_EXTENT_BAD,
 };
 
+enum btrfs_dir_item_field {
+	BTRFS_DIR_ITEM_NAME,
+	BTRFS_DIR_ITEM_LOCATION_OBJECTID,
+	BTRFS_DIR_ITEM_BAD,
+};
+
 enum btrfs_metadata_block_field {
 	BTRFS_METADATA_BLOCK_GENERATION,
+	BTRFS_METADATA_BLOCK_SHIFT_ITEMS,
 	BTRFS_METADATA_BLOCK_BAD,
+};
+
+enum btrfs_item_field {
+	BTRFS_ITEM_OFFSET,
+	BTRFS_ITEM_BAD,
 };
 
 enum btrfs_key_field {
@@ -332,6 +346,8 @@ convert_metadata_block_field(char *field)
 {
 	if (!strncmp(field, "generation", FIELD_BUF_LEN))
 		return BTRFS_METADATA_BLOCK_GENERATION;
+	if (!strncmp(field, "shift_items", FIELD_BUF_LEN))
+		return BTRFS_METADATA_BLOCK_SHIFT_ITEMS;
 	return BTRFS_METADATA_BLOCK_BAD;
 }
 
@@ -346,9 +362,34 @@ static enum btrfs_key_field convert_key_field(char *field)
 	return BTRFS_KEY_BAD;
 }
 
+static enum btrfs_item_field convert_item_field(char *field)
+{
+	if (!strncmp(field, "offset", FIELD_BUF_LEN))
+		return BTRFS_ITEM_OFFSET;
+	return BTRFS_ITEM_BAD;
+}
+
+static enum btrfs_dir_item_field convert_dir_item_field(char *field)
+{
+	if (!strncmp(field, "name", FIELD_BUF_LEN))
+		return BTRFS_DIR_ITEM_NAME;
+	if (!strncmp(field, "location_objectid", FIELD_BUF_LEN))
+		return BTRFS_DIR_ITEM_LOCATION_OBJECTID;
+	return BTRFS_DIR_ITEM_BAD;
+}
+
 static u64 generate_u64(u64 orig)
 {
 	u64 ret;
+	do {
+		ret = rand();
+	} while (ret == orig);
+	return ret;
+}
+
+static u32 generate_u32(u32 orig)
+{
+	u32 ret;
 	do {
 		ret = rand();
 	} while (ret == orig);
@@ -421,6 +462,80 @@ out:
 	return ret;
 }
 
+static int corrupt_dir_item(struct btrfs_root *root, struct btrfs_key *key,
+			    char *field)
+{
+	struct btrfs_trans_handle *trans;
+	struct btrfs_dir_item *di;
+	struct btrfs_path *path;
+	char *name;
+	struct btrfs_key location;
+	struct btrfs_disk_key disk_key;
+	unsigned long name_ptr;
+	enum btrfs_dir_item_field corrupt_field =
+		convert_dir_item_field(field);
+	u64 bogus;
+	u16 name_len;
+	int ret;
+
+	if (corrupt_field == BTRFS_DIR_ITEM_BAD) {
+		fprintf(stderr, "Invalid field %s\n", field);
+		return -EINVAL;
+	}
+
+	path = btrfs_alloc_path();
+	if (!path)
+		return -ENOMEM;
+
+	trans = btrfs_start_transaction(root, 1);
+	if (IS_ERR(trans)) {
+		btrfs_free_path(path);
+		return PTR_ERR(trans);
+	}
+
+	ret = btrfs_search_slot(trans, root, key, path, 0, 1);
+	if (ret) {
+		if (ret > 0)
+			ret = -ENOENT;
+		fprintf(stderr, "Error searching for dir item %d\n", ret);
+		goto out;
+	}
+
+	di = btrfs_item_ptr(path->nodes[0], path->slots[0],
+			    struct btrfs_dir_item);
+
+	switch (corrupt_field) {
+	case BTRFS_DIR_ITEM_NAME:
+		name_len = btrfs_dir_name_len(path->nodes[0], di);
+		name = malloc(name_len);
+		if (!name) {
+			ret = -ENOMEM;
+			goto out;
+		}
+		name_ptr = (unsigned long)(di + 1);
+		read_extent_buffer(path->nodes[0], name, name_ptr, name_len);
+		name[0]++;
+		write_extent_buffer(path->nodes[0], name, name_ptr, name_len);
+		btrfs_mark_buffer_dirty(path->nodes[0]);
+		free(name);
+		goto out;
+	case BTRFS_DIR_ITEM_LOCATION_OBJECTID:
+		btrfs_dir_item_key_to_cpu(path->nodes[0], di, &location);
+		bogus = generate_u64(location.objectid);
+		location.objectid = bogus;
+		btrfs_cpu_key_to_disk(&disk_key, &location);
+		btrfs_set_dir_item_key(path->nodes[0], di, &disk_key);
+		btrfs_mark_buffer_dirty(path->nodes[0]);
+		goto out;
+	default:
+		ret = -EINVAL;
+		goto out;
+	}
+out:
+	btrfs_commit_transaction(trans, root);
+	btrfs_free_path(path);
+	return ret;
+}
 
 static int corrupt_inode(struct btrfs_trans_handle *trans,
 			 struct btrfs_root *root, u64 inode, char *field)
@@ -538,6 +653,27 @@ out:
 	return ret;
 }
 
+static void shift_items(struct btrfs_root *root, struct extent_buffer *eb)
+{
+	int nritems = btrfs_header_nritems(eb);
+	int shift_space = btrfs_leaf_free_space(root, eb) / 2;
+	int slot = nritems / 2;
+	int i = 0;
+	unsigned int data_end = btrfs_item_offset_nr(eb, nritems - 1);
+
+	/* Shift the item data up to and including slot back by shift space */
+	memmove_extent_buffer(eb, btrfs_leaf_data(eb) + data_end - shift_space,
+			      btrfs_leaf_data(eb) + data_end,
+			      btrfs_item_offset_nr(eb, slot - 1) - data_end);
+
+	/* Now update the item pointers. */
+	for (i = nritems - 1; i >= slot; i--) {
+		u32 offset = btrfs_item_offset_nr(eb, i);
+		offset -= shift_space;
+		btrfs_set_item_offset(eb, btrfs_item_nr(i), offset);
+	}
+}
+
 static int corrupt_metadata_block(struct btrfs_root *root, u64 block,
 				  char *field)
 {
@@ -558,7 +694,7 @@ static int corrupt_metadata_block(struct btrfs_root *root, u64 block,
 	}
 
 	eb = read_tree_block(root, block, root->leafsize, 0);
-	if (!eb) {
+	if (!extent_buffer_uptodate(eb)) {
 		fprintf(stderr, "Couldn't read in tree block %s\n", field);
 		return -EINVAL;
 	}
@@ -608,6 +744,9 @@ static int corrupt_metadata_block(struct btrfs_root *root, u64 block,
 		bogus = generate_u64(orig);
 		btrfs_set_header_generation(eb, bogus);
 		break;
+	case BTRFS_METADATA_BLOCK_SHIFT_ITEMS:
+		shift_items(root, path->nodes[level]);
+		break;
 	default:
 		ret = -EINVAL;
 		break;
@@ -619,23 +758,90 @@ out:
 	return ret;
 }
 
-static struct option long_options[] = {
-	/* { "byte-count", 1, NULL, 'b' }, */
-	{ "logical", 1, NULL, 'l' },
-	{ "copy", 1, NULL, 'c' },
-	{ "bytes", 1, NULL, 'b' },
-	{ "extent-record", 0, NULL, 'e' },
-	{ "extent-tree", 0, NULL, 'E' },
-	{ "keys", 0, NULL, 'k' },
-	{ "chunk-record", 0, NULL, 'u' },
-	{ "chunk-tree", 0, NULL, 'U' },
-	{ "inode", 1, NULL, 'i'},
-	{ "file-extent", 1, NULL, 'x'},
-	{ "metadata-block", 1, NULL, 'm'},
-	{ "field", 1, NULL, 'f'},
-	{ "key", 1, NULL, 'K'},
-	{ 0, 0, 0, 0}
-};
+static int corrupt_btrfs_item(struct btrfs_root *root, struct btrfs_key *key,
+			      char *field)
+{
+	struct btrfs_trans_handle *trans;
+	struct btrfs_path *path;
+	enum btrfs_item_field corrupt_field;
+	u32 orig, bogus;
+	int ret;
+
+	corrupt_field = convert_item_field(field);
+	if (corrupt_field == BTRFS_ITEM_BAD) {
+		fprintf(stderr, "Invalid field %s\n", field);
+		return -EINVAL;
+	}
+
+	path = btrfs_alloc_path();
+	if (!path)
+		return -ENOMEM;
+
+	trans = btrfs_start_transaction(root, 1);
+	if (IS_ERR(trans)) {
+		btrfs_free_path(path);
+		fprintf(stderr, "Couldn't start transaction %ld\n",
+			PTR_ERR(trans));
+		return PTR_ERR(trans);
+	}
+
+	ret = btrfs_search_slot(trans, root, key, path, 0, 1);
+	if (ret != 0) {
+		fprintf(stderr, "Error searching to node %d\n", ret);
+		goto out;
+	}
+
+	ret = 0;
+	switch (corrupt_field) {
+	case BTRFS_ITEM_OFFSET:
+		orig = btrfs_item_offset_nr(path->nodes[0], path->slots[0]);
+		bogus = generate_u32(orig);
+		btrfs_set_item_offset(path->nodes[0],
+				      btrfs_item_nr(path->slots[0]), bogus);
+		break;
+	default:
+		ret = -EINVAL;
+		break;
+	}
+	btrfs_mark_buffer_dirty(path->nodes[0]);
+out:
+	btrfs_commit_transaction(trans, root);
+	btrfs_free_path(path);
+	return ret;
+}
+
+static int delete_item(struct btrfs_root *root, struct btrfs_key *key)
+{
+	struct btrfs_trans_handle *trans;
+	struct btrfs_path *path;
+	int ret;
+
+	path = btrfs_alloc_path();
+	if (!path)
+		return -ENOMEM;
+
+	trans = btrfs_start_transaction(root, 1);
+	if (IS_ERR(trans)) {
+		btrfs_free_path(path);
+		fprintf(stderr, "Couldn't start transaction %ld\n",
+			PTR_ERR(trans));
+		return PTR_ERR(trans);
+	}
+
+	ret = btrfs_search_slot(trans, root, key, path, -1, 1);
+	if (ret) {
+		if (ret > 0)
+			ret = -ENOENT;
+		fprintf(stderr, "Error searching to node %d\n", ret);
+		goto out;
+	}
+	ret = btrfs_del_item(trans, root, path);
+	btrfs_mark_buffer_dirty(path->nodes[0]);
+out:
+	btrfs_commit_transaction(trans, root);
+	btrfs_free_path(path);
+	return ret;
+}
 
 /* corrupt item using NO cow.
  * Because chunk recover will recover based on whole partition scaning,
@@ -789,7 +995,6 @@ int main(int ac, char **av)
 	/* chunk offset can be 0,so change to (u64)-1 */
 	u64 logical = (u64)-1;
 	int ret = 0;
-	int option_index = 0;
 	u64 copy = 0;
 	u64 bytes = 4096;
 	int extent_rec = 0;
@@ -797,9 +1002,13 @@ int main(int ac, char **av)
 	int corrupt_block_keys = 0;
 	int chunk_rec = 0;
 	int chunk_tree = 0;
+	int corrupt_item = 0;
+	int corrupt_di = 0;
+	int delete = 0;
 	u64 metadata_block = 0;
 	u64 inode = 0;
 	u64 file_extent = (u64)-1;
+	u64 root_objectid = 0;
 	char field[FIELD_BUF_LEN];
 
 	field[0] = '\0';
@@ -808,8 +1017,31 @@ int main(int ac, char **av)
 
 	while(1) {
 		int c;
-		c = getopt_long(ac, av, "l:c:b:eEkuUi:f:x:m:K:", long_options,
-				&option_index);
+		int option_index = 0;
+		static const struct option long_options[] = {
+			/* { "byte-count", 1, NULL, 'b' }, */
+			{ "logical", 1, NULL, 'l' },
+			{ "copy", 1, NULL, 'c' },
+			{ "bytes", 1, NULL, 'b' },
+			{ "extent-record", 0, NULL, 'e' },
+			{ "extent-tree", 0, NULL, 'E' },
+			{ "keys", 0, NULL, 'k' },
+			{ "chunk-record", 0, NULL, 'u' },
+			{ "chunk-tree", 0, NULL, 'U' },
+			{ "inode", 1, NULL, 'i'},
+			{ "file-extent", 1, NULL, 'x'},
+			{ "metadata-block", 1, NULL, 'm'},
+			{ "field", 1, NULL, 'f'},
+			{ "key", 1, NULL, 'K'},
+			{ "item", 0, NULL, 'I'},
+			{ "dir-item", 0, NULL, 'D'},
+			{ "delete", 0, NULL, 'd'},
+			{ "root", 0, NULL, 'r'},
+			{ NULL, 0, NULL, 0 }
+		};
+
+		c = getopt_long(ac, av, "l:c:b:eEkuUi:f:x:m:K:IDdr:",
+				long_options, &option_index);
 		if (c < 0)
 			break;
 		switch(c) {
@@ -836,6 +1068,7 @@ int main(int ac, char **av)
 				break;
 			case 'U':
 				chunk_tree = 1;
+				break;
 			case 'i':
 				inode = arg_strtou64(optarg);
 				break;
@@ -858,6 +1091,18 @@ int main(int ac, char **av)
 						"%d\n", errno);
 					print_usage();
 				}
+				break;
+			case 'D':
+				corrupt_di = 1;
+				break;
+			case 'I':
+				corrupt_item = 1;
+				break;
+			case 'd':
+				delete = 1;
+				break;
+			case 'r':
+				root_objectid = arg_strtou64(optarg);
 				break;
 			default:
 				print_usage();
@@ -953,6 +1198,39 @@ int main(int ac, char **av)
 		if (!strlen(field))
 			print_usage();
 		ret = corrupt_metadata_block(root, metadata_block, field);
+		goto out_close;
+	}
+	if (corrupt_di) {
+		if (!key.objectid || !strlen(field))
+			print_usage();
+		ret = corrupt_dir_item(root, &key, field);
+		goto out_close;
+	}
+	if (corrupt_item) {
+		if (!key.objectid)
+			print_usage();
+		ret = corrupt_btrfs_item(root, &key, field);
+	}
+	if (delete) {
+		struct btrfs_root *target = root;
+
+		if (!key.objectid)
+			print_usage();
+		if (root_objectid) {
+			struct btrfs_key root_key;
+
+			root_key.objectid = root_objectid;
+			root_key.type = BTRFS_ROOT_ITEM_KEY;
+			root_key.offset = (u64)-1;
+
+			target = btrfs_read_fs_root(root->fs_info, &root_key);
+			if (IS_ERR(target)) {
+				fprintf(stderr, "Couldn't find root %llu\n",
+					(unsigned long long)root_objectid);
+				print_usage();
+			}
+		}
+		ret = delete_item(target, &key);
 		goto out_close;
 	}
 	if (key.objectid || key.offset || key.type) {

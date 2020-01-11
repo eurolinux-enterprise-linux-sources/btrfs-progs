@@ -16,8 +16,8 @@
  * Boston, MA 021110-1307, USA.
  */
 
-#ifndef __UTILS__
-#define __UTILS__
+#ifndef __BTRFS_UTILS_H__
+#define __BTRFS_UTILS_H__
 
 #include <sys/stat.h>
 #include "ctree.h"
@@ -25,11 +25,10 @@
 
 #define BTRFS_MKFS_SYSTEM_GROUP_SIZE (4 * 1024 * 1024)
 #define BTRFS_MKFS_SMALL_VOLUME_SIZE (1024 * 1024 * 1024)
+#define BTRFS_MKFS_DEFAULT_NODE_SIZE 16384
 
-#define BTRFS_SCAN_PROC		(1ULL << 0)
-#define BTRFS_SCAN_DEV		(1ULL << 1)
-#define BTRFS_SCAN_MOUNTED	(1ULL << 2)
-#define BTRFS_SCAN_LBLKID	(1ULL << 3)
+#define BTRFS_SCAN_MOUNTED	(1ULL << 0)
+#define BTRFS_SCAN_LBLKID	(1ULL << 1)
 
 #define BTRFS_UPDATE_KERNEL	1
 
@@ -37,10 +36,20 @@
 #define BTRFS_ARG_MNTPOINT	1
 #define BTRFS_ARG_UUID		2
 #define BTRFS_ARG_BLKDEV	3
+#define BTRFS_ARG_REG		4
 
 #define BTRFS_UUID_UNPARSED_SIZE	37
 
-#define ARGV0_BUF_SIZE	64
+#define ARGV0_BUF_SIZE	PATH_MAX
+
+#define GETOPT_VAL_SI				256
+#define GETOPT_VAL_IEC				257
+#define GETOPT_VAL_RAW				258
+#define GETOPT_VAL_HUMAN_READABLE		259
+#define GETOPT_VAL_KBYTES			260
+#define GETOPT_VAL_MBYTES			261
+#define GETOPT_VAL_GBYTES			262
+#define GETOPT_VAL_TBYTES			263
 
 int check_argc_exact(int nargs, int expected);
 int check_argc_min(int nargs, int expected);
@@ -48,6 +57,28 @@ int check_argc_max(int nargs, int expected);
 
 void fixup_argv0(char **argv, const char *token);
 void set_argv0(char **argv);
+
+/*
+ * Output modes of size
+ */
+#define UNITS_RESERVED			(0)
+#define UNITS_BYTES			(1)
+#define UNITS_KBYTES			(2)
+#define UNITS_MBYTES			(3)
+#define UNITS_GBYTES			(4)
+#define UNITS_TBYTES			(5)
+#define UNITS_RAW			(1U << UNITS_MODE_SHIFT)
+#define UNITS_BINARY			(2U << UNITS_MODE_SHIFT)
+#define UNITS_DECIMAL			(3U << UNITS_MODE_SHIFT)
+#define UNITS_MODE_MASK			((1U << UNITS_MODE_SHIFT) - 1)
+#define UNITS_MODE_SHIFT		(8)
+#define UNITS_HUMAN_BINARY		(UNITS_BINARY)
+#define UNITS_HUMAN_DECIMAL		(UNITS_DECIMAL)
+#define UNITS_HUMAN			(UNITS_HUMAN_BINARY)
+#define UNITS_DEFAULT			(UNITS_HUMAN)
+
+void units_set_mode(unsigned *units, unsigned mode);
+void units_set_base(unsigned *units, unsigned base);
 
 int make_btrfs(int fd, const char *device, const char *label,
 	       char *fs_uuid, u64 blocks[6], u64 num_bytes, u32 nodesize,
@@ -61,8 +92,8 @@ int btrfs_add_to_fsid(struct btrfs_trans_handle *trans,
 		      u64 block_count, u32 io_width, u32 io_align,
 		      u32 sectorsize);
 int btrfs_scan_for_fsid(int run_ioctls);
-void btrfs_register_one_device(char *fname);
-int btrfs_scan_one_dir(char *dirname, int run_ioctl);
+int btrfs_register_one_device(const char *fname);
+int btrfs_register_all_devices(void);
 char *canonicalize_dm_name(const char *ptname);
 char *canonicalize_path(const char *path);
 int check_mounted(const char *devicename);
@@ -71,17 +102,19 @@ int check_mounted_where(int fd, const char *file, char *where, int size,
 int btrfs_device_already_in_root(struct btrfs_root *root, int fd,
 				 int super_offset);
 
-int pretty_size_snprintf(u64 size, char *str, size_t str_bytes);
-#define pretty_size(size) 						\
-	({								\
-		static __thread char _str[24];				\
-		(void)pretty_size_snprintf((size), _str, sizeof(_str));	\
-		_str;							\
+int pretty_size_snprintf(u64 size, char *str, size_t str_bytes, unsigned unit_mode);
+#define pretty_size(size) 	pretty_size_mode(size, UNITS_DEFAULT)
+#define pretty_size_mode(size, mode) 					      \
+	({								      \
+		static __thread char _str[32];				      \
+		(void)pretty_size_snprintf((size), _str, sizeof(_str), (mode)); \
+		_str;							      \
 	})
 
 int get_mountpt(char *dev, char *mntpt, size_t size);
 int btrfs_scan_block_devices(int run_ioctl);
 u64 parse_size(char *s);
+u64 parse_qgroupid(const char *p);
 u64 arg_strtou64(const char *str);
 int open_file_or_dir(const char *fname, DIR **dirstream);
 int open_file_or_dir3(const char *fname, DIR **dirstream, int open_flags);
@@ -94,12 +127,12 @@ int set_label(const char *btrfs_dev, const char *label);
 char *__strncpy__null(char *dest, const char *src, size_t n);
 int is_block_device(const char *file);
 int is_mount_point(const char *file);
+int check_arg_type(const char *input);
 int open_path_or_dev_mnt(const char *path, DIR **dirstream);
 u64 btrfs_device_size(int fd, struct stat *st);
 /* Helper to always get proper size of the destination string */
 #define strncpy_null(dest, src) __strncpy__null(dest, src, sizeof(dest))
 int test_dev_for_mkfs(char *file, int force_overwrite, char *estr);
-int scan_for_btrfs(int where, int update_kernel);
 int get_label_mounted(const char *mount_path, char *labelp);
 int test_num_disk_vs_raid(u64 metadata_profile, u64 data_profile,
 	u64 dev_cnt, int mixed, char *estr);
@@ -108,12 +141,18 @@ int csum_tree_block(struct btrfs_root *root, struct extent_buffer *buf,
 			   int verify);
 int ask_user(char *question);
 int lookup_ino_rootid(int fd, u64 *rootid);
-int btrfs_scan_lblkid(int update_kernel);
+int btrfs_scan_lblkid(void);
 int get_btrfs_mount(const char *dev, char *mp, size_t mp_size);
 int find_mount_root(const char *path, char **mount_root);
 int get_device_info(int fd, u64 devid,
 		struct btrfs_ioctl_dev_info_args *di_args);
 int test_uuid_unique(char *fs_uuid);
+u64 disk_size(char *path);
+int get_device_info(int fd, u64 devid,
+		struct btrfs_ioctl_dev_info_args *di_args);
+u64 get_partition_size(char *dev);
+const char* group_type_str(u64 flags);
+const char* group_profile_str(u64 flags);
 
 int test_minimum_size(const char *file, u32 leafsize);
 int test_issubvolname(const char *name);
@@ -138,5 +177,39 @@ static inline u64 btrfs_min_dev_size(u32 leafsize)
 	return 2 * (BTRFS_MKFS_SYSTEM_GROUP_SIZE +
 		    btrfs_min_global_blk_rsv_size(leafsize));
 }
+
+int find_next_key(struct btrfs_path *path, struct btrfs_key *key);
+char* btrfs_group_type_str(u64 flag);
+char* btrfs_group_profile_str(u64 flag);
+
+/*
+ * Get the length of the string converted from a u64 number.
+ *
+ * Result is equal to log10(num) + 1, but without the use of math library.
+ */
+static inline int count_digits(u64 num)
+{
+	int ret = 0;
+
+	if (num == 0)
+		return 1;
+	while (num > 0) {
+		ret++;
+		num /= 10;
+	}
+	return ret;
+}
+
+static inline u64 div_factor(u64 num, int factor)
+{
+	if (factor == 10)
+		return num;
+	num *= factor;
+	num /= 10;
+	return num;
+}
+
+int btrfs_tree_search2_ioctl_supported(int fd);
+int btrfs_check_node_or_leaf_size(u32 size, u32 sectorsize);
 
 #endif

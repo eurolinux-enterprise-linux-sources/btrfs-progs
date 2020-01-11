@@ -16,8 +16,6 @@
  * Boston, MA 021110-1307, USA.
  */
 
-#define _XOPEN_SOURCE 500
-#define _GNU_SOURCE 1
 #include <stdio.h>
 #include <stdlib.h>
 #include <fcntl.h>
@@ -30,7 +28,6 @@
 #include "print-tree.h"
 #include "transaction.h"
 #include "list.h"
-#include "version.h"
 #include "utils.h"
 
 /* we write the mirror info to stdout unless they are dumping the data
@@ -76,8 +73,18 @@ static struct extent_buffer * debug_read_block(struct btrfs_root *root,
 			(unsigned long long)eb->dev_bytenr, device->name);
 		kfree(multi);
 
-		if (!copy || mirror_num == copy)
+		if (!copy || mirror_num == copy) {
 			ret = read_extent_from_disk(eb, 0, eb->len);
+			if (ret) {
+				fprintf(info_file,
+					"Error: failed to read extent: mirror %d logical %llu: %s\n",
+					mirror_num, (unsigned long long)eb->start,
+					strerror(-ret));
+				free_extent_buffer(eb);
+				eb = NULL;
+				break;
+			}
+		}
 
 		num_copies = btrfs_num_copies(&root->fs_info->mapping_tree,
 					      eb->start, eb->len);
@@ -102,15 +109,6 @@ static void print_usage(void)
 	exit(1);
 }
 
-static struct option long_options[] = {
-	/* { "byte-count", 1, NULL, 'b' }, */
-	{ "logical", 1, NULL, 'l' },
-	{ "copy", 1, NULL, 'c' },
-	{ "output", 1, NULL, 'o' },
-	{ "bytes", 1, NULL, 'b' },
-	{ NULL, 0, NULL, 0}
-};
-
 int main(int ac, char **av)
 {
 	struct cache_tree root_cache;
@@ -120,13 +118,22 @@ int main(int ac, char **av)
 	char *output_file = NULL;
 	u64 logical = 0;
 	int ret = 0;
-	int option_index = 0;
 	u64 copy = 0;
 	u64 bytes = 0;
 	int out_fd = 0;
 
 	while(1) {
 		int c;
+		int option_index = 0;
+		static const struct option long_options[] = {
+			/* { "byte-count", 1, NULL, 'b' }, */
+			{ "logical", 1, NULL, 'l' },
+			{ "copy", 1, NULL, 'c' },
+			{ "output", 1, NULL, 'o' },
+			{ "bytes", 1, NULL, 'b' },
+			{ NULL, 0, NULL, 0}
+		};
+
 		c = getopt_long(ac, av, "l:c:o:b:", long_options,
 				&option_index);
 		if (c < 0)

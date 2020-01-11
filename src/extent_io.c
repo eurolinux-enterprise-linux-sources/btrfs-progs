@@ -16,8 +16,6 @@
  * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
  * Boston, MA 021110-1307, USA.
  */
-#define _XOPEN_SOURCE 600
-#define __USE_XOPEN2K
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/types.h>
@@ -29,9 +27,6 @@
 #include "list.h"
 #include "ctree.h"
 #include "volumes.h"
-
-static u64 cache_soft_max = 1024 * 1024 * 256;
-static u64 cache_hard_max = 1 * 1024 * 1024 * 1024;
 
 void extent_io_tree_init(struct extent_io_tree *tree)
 {
@@ -77,12 +72,9 @@ void extent_io_tree_cleanup(struct extent_io_tree *tree)
 
 	while(!list_empty(&tree->lru)) {
 		eb = list_entry(tree->lru.next, struct extent_buffer, lru);
-		if (eb->refs != 1) {
-			fprintf(stderr, "extent buffer leak: "
-				"start %llu len %u\n",
-				(unsigned long long)eb->start, eb->len);
-			eb->refs = 1;
-		}
+		fprintf(stderr, "extent buffer leak: "
+			"start %llu len %u\n",
+			(unsigned long long)eb->start, eb->len);
 		free_extent_buffer(eb);
 	}
 
@@ -541,35 +533,10 @@ out:
 	return ret;
 }
 
-static int free_some_buffers(struct extent_io_tree *tree)
-{
-	u32 nrscan = 0;
-	struct extent_buffer *eb;
-	struct list_head *node, *next;
-
-	if (tree->cache_size < cache_soft_max)
-		return 0;
-
-	list_for_each_safe(node, next, &tree->lru) {
-		eb = list_entry(node, struct extent_buffer, lru);
-		if (eb->refs == 1 && !(eb->flags & EXTENT_DIRTY)) {
-			free_extent_buffer(eb);
-			if (tree->cache_size < cache_hard_max)
-				break;
-		} else {
-			list_move_tail(&eb->lru, &tree->lru);
-		}
-		if (nrscan++ > 64 && tree->cache_size < cache_hard_max)
-			break;
-	}
-	return 0;
-}
-
 static struct extent_buffer *__alloc_extent_buffer(struct extent_io_tree *tree,
 						   u64 bytenr, u32 blocksize)
 {
 	struct extent_buffer *eb;
-	int ret;
 
 	eb = malloc(sizeof(struct extent_buffer) + blocksize);
 	if (!eb) {
@@ -589,20 +556,26 @@ static struct extent_buffer *__alloc_extent_buffer(struct extent_io_tree *tree,
 	eb->cache_node.size = blocksize;
 	INIT_LIST_HEAD(&eb->recow);
 
-	free_some_buffers(tree);
-	ret = insert_cache_extent(&tree->cache, &eb->cache_node);
-	if (ret) {
-		free(eb);
-		return NULL;
-	}
-	list_add_tail(&eb->lru, &tree->lru);
-	tree->cache_size += blocksize;
 	return eb;
+}
+
+struct extent_buffer *btrfs_clone_extent_buffer(struct extent_buffer *src)
+{
+	struct extent_buffer *new;
+
+	new = __alloc_extent_buffer(NULL, src->start, src->len);
+	if (new == NULL)
+		return NULL;
+
+	copy_extent_buffer(new, src, 0, 0, src->len);
+	new->flags |= EXTENT_BUFFER_DUMMY;
+
+	return new;
 }
 
 void free_extent_buffer(struct extent_buffer *eb)
 {
-	if (!eb)
+	if (!eb || IS_ERR(eb))
 		return;
 
 	eb->refs--;
@@ -612,9 +585,11 @@ void free_extent_buffer(struct extent_buffer *eb)
 		BUG_ON(eb->flags & EXTENT_DIRTY);
 		list_del_init(&eb->lru);
 		list_del_init(&eb->recow);
-		remove_cache_extent(&tree->cache, &eb->cache_node);
-		BUG_ON(tree->cache_size < eb->len);
-		tree->cache_size -= eb->len;
+		if (!(eb->flags & EXTENT_BUFFER_DUMMY)) {
+			BUG_ON(tree->cache_size < eb->len);
+			remove_cache_extent(&tree->cache, &eb->cache_node);
+			tree->cache_size -= eb->len;
+		}
 		free(eb);
 	}
 }
@@ -663,12 +638,23 @@ struct extent_buffer *alloc_extent_buffer(struct extent_io_tree *tree,
 		list_move_tail(&eb->lru, &tree->lru);
 		eb->refs++;
 	} else {
+		int ret;
+
 		if (cache) {
 			eb = container_of(cache, struct extent_buffer,
 					  cache_node);
 			free_extent_buffer(eb);
 		}
 		eb = __alloc_extent_buffer(tree, bytenr, blocksize);
+		if (!eb)
+			return NULL;
+		ret = insert_cache_extent(&tree->cache, &eb->cache_node);
+		if (ret) {
+			free(eb);
+			return NULL;
+		}
+		list_add_tail(&eb->lru, &tree->lru);
+		tree->cache_size += blocksize;
 	}
 	return eb;
 }
@@ -678,8 +664,10 @@ int read_extent_from_disk(struct extent_buffer *eb,
 {
 	int ret;
 	ret = pread(eb->fd, eb->data + offset, len, eb->dev_bytenr);
-	if (ret < 0)
+	if (ret < 0) {
+		ret = -errno;
 		goto out;
+	}
 	if (ret != len) {
 		ret = -EIO;
 		goto out;
@@ -836,30 +824,6 @@ int write_data_to_disk(struct btrfs_fs_info *info, void *buf, u64 offset,
 		kfree(multi);
 		multi = NULL;
 	}
-	return 0;
-}
-
-
-int set_extent_buffer_uptodate(struct extent_buffer *eb)
-{
-	eb->flags |= EXTENT_UPTODATE;
-	return 0;
-}
-
-int clear_extent_buffer_uptodate(struct extent_io_tree *tree,
-				struct extent_buffer *eb)
-{
-	eb->flags &= ~EXTENT_UPTODATE;
-	return 0;
-}
-
-int extent_buffer_uptodate(struct extent_buffer *eb)
-{
-	if (!eb)
-		return 0;
-
-	if (eb->flags & EXTENT_UPTODATE)
-		return 1;
 	return 0;
 }
 

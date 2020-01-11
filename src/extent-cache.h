@@ -16,8 +16,8 @@
  * Boston, MA 021110-1307, USA.
  */
 
-#ifndef __EXTENT_CACHE_H__
-#define __EXTENT_CACHE_H__
+#ifndef __BTRFS_EXTENT_CACHE_H__
+#define __BTRFS_EXTENT_CACHE_H__
 
 #if BTRFS_FLAT_INCLUDES
 #include "kerncompat.h"
@@ -41,6 +41,7 @@ struct cache_extent {
 void cache_tree_init(struct cache_tree *tree);
 
 struct cache_extent *first_cache_extent(struct cache_tree *tree);
+struct cache_extent *last_cache_extent(struct cache_tree *tree);
 struct cache_extent *prev_cache_extent(struct cache_extent *pe);
 struct cache_extent *next_cache_extent(struct cache_extent *pe);
 

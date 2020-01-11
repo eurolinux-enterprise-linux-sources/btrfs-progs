@@ -16,8 +16,6 @@
  * Boston, MA 021110-1307, USA.
  */
 
-#define _XOPEN_SOURCE 500
-#define _GNU_SOURCE 1
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -29,14 +27,13 @@
 #include "print-tree.h"
 #include "transaction.h"
 #include "list.h"
-#include "version.h"
 #include "utils.h"
 
 static void print_usage(void) __attribute__((noreturn));
 static void print_usage(void)
 {
 	fprintf(stderr, "usage: btrfs-zero-log dev\n");
-	fprintf(stderr, "%s\n", BTRFS_BUILD_VERSION);
+	fprintf(stderr, "%s\n", PACKAGE_STRING);
 	exit(1);
 }
 
@@ -61,7 +58,7 @@ int main(int ac, char **av)
 		goto out;
 	}
 
-	root = open_ctree(av[1], 0, OPEN_CTREE_WRITES);
+	root = open_ctree(av[1], 0, OPEN_CTREE_WRITES | OPEN_CTREE_PARTIAL);
 
 	if (root == NULL)
 		return 1;
@@ -71,6 +68,7 @@ int main(int ac, char **av)
 	btrfs_set_super_log_root_level(root->fs_info->super_copy, 0);
 	btrfs_commit_transaction(trans, root);
 	close_ctree(root);
+	printf("Log root zero'ed\n");
 out:
 	return !!ret;
 }

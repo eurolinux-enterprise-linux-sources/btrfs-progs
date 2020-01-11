@@ -29,6 +29,7 @@
 #include "volumes.h"
 #include "free-space-cache.h"
 #include "math.h"
+#include "utils.h"
 
 #define PENDING_EXTENT_INSERT 0
 #define PENDING_EXTENT_DELETE 1
@@ -972,27 +973,6 @@ static inline int extent_ref_type(u64 parent, u64 owner)
 	return type;
 }
 
-static int find_next_key(struct btrfs_path *path, struct btrfs_key *key)
-
-{
-	int level;
-	for (level = 0; level < BTRFS_MAX_LEVEL; level++) {
-		if (!path->nodes[level])
-			break;
-		if (path->slots[level] + 1 >=
-		    btrfs_header_nritems(path->nodes[level]))
-			continue;
-		if (level == 0)
-			btrfs_item_key_to_cpu(path->nodes[level], key,
-					      path->slots[level] + 1);
-		else
-			btrfs_node_key_to_cpu(path->nodes[level], key,
-					      path->slots[level] + 1);
-		return 0;
-	}
-	return 1;
-}
-
 static int lookup_inline_extent_backref(struct btrfs_trans_handle *trans,
 				 struct btrfs_root *root,
 				 struct btrfs_path *path,
@@ -1809,11 +1789,11 @@ int btrfs_write_dirty_block_groups(struct btrfs_trans_handle *trans,
 static struct btrfs_space_info *__find_space_info(struct btrfs_fs_info *info,
 						  u64 flags)
 {
-	struct list_head *head = &info->space_info;
-	struct list_head *cur;
 	struct btrfs_space_info *found;
-	list_for_each(cur, head) {
-		found = list_entry(cur, struct btrfs_space_info, list);
+
+	flags &= BTRFS_BLOCK_GROUP_TYPE_MASK;
+
+	list_for_each_entry(found, &info->space_info, list) {
 		if (found->flags & flags)
 			return found;
 	}
@@ -1845,7 +1825,7 @@ static int update_space_info(struct btrfs_fs_info *info, u64 flags,
 		return -ENOMEM;
 
 	list_add(&found->list, &info->space_info);
-	found->flags = flags;
+	found->flags = flags & BTRFS_BLOCK_GROUP_TYPE_MASK;
 	found->total_bytes = total_bytes;
 	found->bytes_used = bytes_used;
 	found->bytes_pinned = 0;
@@ -2586,6 +2566,13 @@ check_failed:
 		goto new_group;
 	}
 
+	if (info->excluded_extents &&
+	    test_range_bit(info->excluded_extents, ins->objectid,
+			   ins->objectid + num_bytes -1, EXTENT_DIRTY, 0)) {
+		search_start = ins->objectid + num_bytes;
+		goto new_group;
+	}
+
 	if (exclude_nr > 0 && (ins->objectid + num_bytes > exclude_start &&
 	    ins->objectid < exclude_start + exclude_nr)) {
 		search_start = exclude_start + exclude_nr;
@@ -2982,6 +2969,13 @@ static int noinline walk_down_tree(struct btrfs_trans_handle *trans,
 			next = read_tree_block(root, bytenr, blocksize,
 					       ptr_gen);
 			mutex_lock(&root->fs_info->fs_mutex);
+			if (!extent_buffer_uptodate(next)) {
+				if (IS_ERR(next))
+					ret = PTR_ERR(next);
+				else
+					ret = -EIO;
+				break;
+			}
 		}
 		WARN_ON(*level <= 0);
 		if (path->nodes[*level-1])

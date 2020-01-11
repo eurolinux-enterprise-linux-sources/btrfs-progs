@@ -14,7 +14,6 @@
  * Boston, MA 021110-1307, USA.
  */
 
-#define _XOPEN_SOURCE 500
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,8 +33,8 @@
 #include "ioctl.h"
 #include "utils.h"
 #include "volumes.h"
-#include "version.h"
 #include "commands.h"
+#include "cmds-fi-disk_usage.h"
 #include "list_sort.h"
 #include "disk-io.h"
 
@@ -52,6 +51,15 @@ struct seen_fsid {
 };
 
 static struct seen_fsid *seen_fsid_hash[SEEN_FSID_HASH_SIZE] = {NULL,};
+
+static int is_seen_fsid(u8 *fsid)
+{
+	u8 hash = fsid[0];
+	int slot = hash % SEEN_FSID_HASH_SIZE;
+	struct seen_fsid *seen = seen_fsid_hash[slot];
+
+	return seen ? 1 : 0;
+}
 
 static int add_seen_fsid(u8 *fsid)
 {
@@ -112,54 +120,21 @@ static const char * const filesystem_cmd_group_usage[] = {
 	NULL
 };
 
-static const char * const cmd_df_usage[] = {
-	"btrfs filesystem df <path>",
-	"Show space usage information for a mount point",
-	NULL
+static const char * const cmd_filesystem_df_usage[] = {
+       "btrfs filesystem df [options] <path>",
+       "Show space usage information for a mount point",
+	"-b|--raw           raw numbers in bytes",
+	"-h|--human-readable",
+	"                   human friendly numbers, base 1024 (default)",
+	"-H                 human friendly numbers, base 1000",
+	"--iec              use 1024 as a base (KiB, MiB, GiB, TiB)",
+	"--si               use 1000 as a base (kB, MB, GB, TB)",
+	"-k|--kbytes        show sizes in KiB, or kB with --si",
+	"-m|--mbytes        show sizes in MiB, or MB with --si",
+	"-g|--gbytes        show sizes in GiB, or GB with --si",
+	"-t|--tbytes        show sizes in TiB, or TB with --si",
+       NULL
 };
-
-static char *group_type_str(u64 flag)
-{
-	u64 mask = BTRFS_BLOCK_GROUP_TYPE_MASK |
-		BTRFS_SPACE_INFO_GLOBAL_RSV;
-
-	switch (flag & mask) {
-	case BTRFS_BLOCK_GROUP_DATA:
-		return "Data";
-	case BTRFS_BLOCK_GROUP_SYSTEM:
-		return "System";
-	case BTRFS_BLOCK_GROUP_METADATA:
-		return "Metadata";
-	case BTRFS_BLOCK_GROUP_DATA|BTRFS_BLOCK_GROUP_METADATA:
-		return "Data+Metadata";
-	case BTRFS_SPACE_INFO_GLOBAL_RSV:
-		return "GlobalReserve";
-	default:
-		return "unknown";
-	}
-}
-
-static char *group_profile_str(u64 flag)
-{
-	switch (flag & BTRFS_BLOCK_GROUP_PROFILE_MASK) {
-	case 0:
-		return "single";
-	case BTRFS_BLOCK_GROUP_RAID0:
-		return "RAID0";
-	case BTRFS_BLOCK_GROUP_RAID1:
-		return "RAID1";
-	case BTRFS_BLOCK_GROUP_RAID5:
-		return "RAID5";
-	case BTRFS_BLOCK_GROUP_RAID6:
-		return "RAID6";
-	case BTRFS_BLOCK_GROUP_DUP:
-		return "DUP";
-	case BTRFS_BLOCK_GROUP_RAID10:
-		return "RAID10";
-	default:
-		return "unknown";
-	}
-}
 
 static int get_df(int fd, struct btrfs_ioctl_space_args **sargs_ret)
 {
@@ -209,32 +184,85 @@ static int get_df(int fd, struct btrfs_ioctl_space_args **sargs_ret)
 	return 0;
 }
 
-static void print_df(struct btrfs_ioctl_space_args *sargs)
+static void print_df(struct btrfs_ioctl_space_args *sargs, unsigned unit_mode)
 {
 	u64 i;
 	struct btrfs_ioctl_space_info *sp = sargs->spaces;
 
 	for (i = 0; i < sargs->total_spaces; i++, sp++) {
 		printf("%s, %s: total=%s, used=%s\n",
-			group_type_str(sp->flags),
-			group_profile_str(sp->flags),
-			pretty_size(sp->total_bytes),
-			pretty_size(sp->used_bytes));
+			btrfs_group_type_str(sp->flags),
+			btrfs_group_profile_str(sp->flags),
+			pretty_size_mode(sp->total_bytes, unit_mode),
+			pretty_size_mode(sp->used_bytes, unit_mode));
 	}
 }
 
-static int cmd_df(int argc, char **argv)
+static int cmd_filesystem_df(int argc, char **argv)
 {
 	struct btrfs_ioctl_space_args *sargs = NULL;
 	int ret;
 	int fd;
 	char *path;
-	DIR  *dirstream = NULL;
+	DIR *dirstream = NULL;
+	unsigned unit_mode = UNITS_DEFAULT;
 
-	if (check_argc_exact(argc, 2))
-		usage(cmd_df_usage);
+	while (1) {
+		int long_index;
+		static const struct option long_options[] = {
+			{ "raw", no_argument, NULL, 'b'},
+			{ "kbytes", no_argument, NULL, 'k'},
+			{ "mbytes", no_argument, NULL, 'm'},
+			{ "gbytes", no_argument, NULL, 'g'},
+			{ "tbytes", no_argument, NULL, 't'},
+			{ "si", no_argument, NULL, GETOPT_VAL_SI},
+			{ "iec", no_argument, NULL, GETOPT_VAL_IEC},
+			{ "human-readable", no_argument, NULL,
+				GETOPT_VAL_HUMAN_READABLE},
+			{ NULL, 0, NULL, 0 }
+		};
+		int c = getopt_long(argc, argv, "bhHkmgt", long_options,
+					&long_index);
+		if (c < 0)
+			break;
+		switch (c) {
+		case 'b':
+			unit_mode = UNITS_RAW;
+			break;
+		case 'k':
+			units_set_base(&unit_mode, UNITS_KBYTES);
+			break;
+		case 'm':
+			units_set_base(&unit_mode, UNITS_MBYTES);
+			break;
+		case 'g':
+			units_set_base(&unit_mode, UNITS_GBYTES);
+			break;
+		case 't':
+			units_set_base(&unit_mode, UNITS_TBYTES);
+			break;
+		case GETOPT_VAL_HUMAN_READABLE:
+		case 'h':
+			unit_mode = UNITS_HUMAN_BINARY;
+			break;
+		case 'H':
+			unit_mode = UNITS_HUMAN_DECIMAL;
+			break;
+		case GETOPT_VAL_SI:
+			units_set_mode(&unit_mode, UNITS_DECIMAL);
+			break;
+		case GETOPT_VAL_IEC:
+			units_set_mode(&unit_mode, UNITS_BINARY);
+			break;
+		default:
+			usage(cmd_filesystem_df_usage);
+		}
+	}
 
-	path = argv[1];
+	if (check_argc_exact(argc, optind + 1))
+		usage(cmd_filesystem_df_usage);
+
+	path = argv[optind];
 
 	fd = open_file_or_dir(path, &dirstream);
 	if (fd < 0) {
@@ -244,7 +272,7 @@ static int cmd_df(int argc, char **argv)
 	ret = get_df(fd, &sargs);
 
 	if (ret == 0) {
-		print_df(sargs);
+		print_df(sargs, unit_mode);
 		free(sargs);
 	} else {
 		fprintf(stderr, "ERROR: get_df failed %s\n", strerror(-ret));
@@ -310,10 +338,71 @@ static int cmp_device_id(void *priv, struct list_head *a,
 		da->devid > db->devid ? 1 : 0;
 }
 
+static void splice_device_list(struct list_head *seed_devices,
+			       struct list_head *all_devices)
+{
+	struct btrfs_device *in_all, *next_all;
+	struct btrfs_device *in_seed, *next_seed;
+
+	list_for_each_entry_safe(in_all, next_all, all_devices, dev_list) {
+		list_for_each_entry_safe(in_seed, next_seed, seed_devices,
+								dev_list) {
+			if (in_all->devid == in_seed->devid) {
+				/*
+				 * When do dev replace in a sprout fs
+				 * to a dev in its seed fs, the replacing
+				 * dev will reside in the sprout fs and
+				 * the replaced dev will still exist
+				 * in the seed fs.
+				 * So pick the latest one when showing
+				 * the sprout fs.
+				 */
+				if (in_all->generation
+						< in_seed->generation) {
+					list_del(&in_all->dev_list);
+					free(in_all);
+				} else if (in_all->generation
+						> in_seed->generation) {
+					list_del(&in_seed->dev_list);
+					free(in_seed);
+				}
+				break;
+			}
+		}
+	}
+
+	list_splice(seed_devices, all_devices);
+}
+
+static void print_devices(struct btrfs_fs_devices *fs_devices,
+			  u64 *devs_found)
+{
+	struct btrfs_device *device;
+	struct btrfs_fs_devices *cur_fs;
+	struct list_head *all_devices;
+
+	all_devices = &fs_devices->devices;
+	cur_fs = fs_devices->seed;
+	/* add all devices of seed fs to the fs to be printed */
+	while (cur_fs) {
+		splice_device_list(&cur_fs->devices, all_devices);
+		cur_fs = cur_fs->seed;
+	}
+
+	list_sort(NULL, all_devices, cmp_device_id);
+	list_for_each_entry(device, all_devices, dev_list) {
+		printf("\tdevid %4llu size %s used %s path %s\n",
+		       (unsigned long long)device->devid,
+		       pretty_size(device->total_bytes),
+		       pretty_size(device->bytes_used), device->name);
+
+		(*devs_found)++;
+	}
+}
+
 static void print_one_uuid(struct btrfs_fs_devices *fs_devices)
 {
 	char uuidbuf[BTRFS_UUID_UNPARSED_SIZE];
-	struct list_head *cur;
 	struct btrfs_device *device;
 	u64 devs_found = 0;
 	u64 total;
@@ -329,23 +418,13 @@ static void print_one_uuid(struct btrfs_fs_devices *fs_devices)
 	else
 		printf("Label: none ");
 
-
 	total = device->total_devs;
 	printf(" uuid: %s\n\tTotal devices %llu FS bytes used %s\n", uuidbuf,
 	       (unsigned long long)total,
 	       pretty_size(device->super_bytes_used));
 
-	list_sort(NULL, &fs_devices->devices, cmp_device_id);
-	list_for_each(cur, &fs_devices->devices) {
-		device = list_entry(cur, struct btrfs_device, dev_list);
+	print_devices(fs_devices, &devs_found);
 
-		printf("\tdevid %4llu size %s used %s path %s\n",
-		       (unsigned long long)device->devid,
-		       pretty_size(device->total_bytes),
-		       pretty_size(device->bytes_used), device->name);
-
-		devs_found++;
-	}
 	if (devs_found < total) {
 		printf("\t*** Some devices missing\n");
 	}
@@ -392,6 +471,8 @@ static int print_one_fs(struct btrfs_ioctl_fs_info_args *fs_info,
 			pretty_size(calc_used_bytes(space_info)));
 
 	for (i = 0; i < fs_info->num_devices; i++) {
+		char *canonical_path;
+
 		tmp_dev_info = (struct btrfs_ioctl_dev_info_args *)&dev_info[i];
 
 		/* Add check for missing devices even mounted */
@@ -401,49 +482,20 @@ static int print_one_fs(struct btrfs_ioctl_fs_info_args *fs_info,
 			continue;
 		}
 		close(fd);
+		canonical_path = canonicalize_path((char *)tmp_dev_info->path);
 		printf("\tdevid %4llu size %s used %s path %s\n",
 			tmp_dev_info->devid,
 			pretty_size(tmp_dev_info->total_bytes),
 			pretty_size(tmp_dev_info->bytes_used),
-			tmp_dev_info->path);
+			canonical_path);
+
+		free(canonical_path);
 	}
 
 	if (missing)
 		printf("\t*** Some devices missing\n");
 	printf("\n");
 	return 0;
-}
-
-/* This function checks if the given input parameter is
- * an uuid or a path
- * return -1: some error in the given input
- * return 0: unknow input
- * return 1: given input is uuid
- * return 2: given input is path
- */
-static int check_arg_type(char *input)
-{
-	uuid_t	out;
-	char path[PATH_MAX];
-
-	if (!input)
-		return -EINVAL;
-
-	if (realpath(input, path)) {
-		if (is_block_device(path) == 1)
-			return BTRFS_ARG_BLKDEV;
-
-		if (is_mount_point(path) == 1)
-			return BTRFS_ARG_MNTPOINT;
-
-		return BTRFS_ARG_UNKNOWN;
-	}
-
-	if (strlen(input) == (BTRFS_UUID_UNPARSED_SIZE - 1) &&
-		!uuid_parse(input, out))
-		return BTRFS_ARG_UUID;
-
-	return BTRFS_ARG_UNKNOWN;
 }
 
 static int btrfs_scan_kernel(void *search)
@@ -467,8 +519,10 @@ static int btrfs_scan_kernel(void *search)
 			continue;
 		ret = get_fs_info(mnt->mnt_dir, &fs_info_arg,
 				&dev_info_arg);
-		if (ret)
+		if (ret) {
+			kfree(dev_info_arg);
 			goto out;
+		}
 
 		if (get_label_mounted(mnt->mnt_dir, label)) {
 			kfree(dev_info_arg);
@@ -531,6 +585,232 @@ out:
 	return ret;
 }
 
+static void free_fs_devices(struct btrfs_fs_devices *fs_devices)
+{
+	struct btrfs_fs_devices *cur_seed, *next_seed;
+	struct btrfs_device *device;
+
+	while (!list_empty(&fs_devices->devices)) {
+		device = list_entry(fs_devices->devices.next,
+					struct btrfs_device, dev_list);
+		list_del(&device->dev_list);
+
+		free(device->name);
+		free(device->label);
+		free(device);
+	}
+
+	/* free seed fs chain */
+	cur_seed = fs_devices->seed;
+	fs_devices->seed = NULL;
+	while (cur_seed) {
+		next_seed = cur_seed->seed;
+		free(cur_seed);
+
+		cur_seed = next_seed;
+	}
+
+	list_del(&fs_devices->list);
+	free(fs_devices);
+}
+
+static int copy_device(struct btrfs_device *dst,
+		       struct btrfs_device *src)
+{
+	dst->devid = src->devid;
+	memcpy(dst->uuid, src->uuid, BTRFS_UUID_SIZE);
+	if (src->name == NULL)
+		dst->name = NULL;
+	else {
+		dst->name = strdup(src->name);
+		if (!dst->name)
+			return -ENOMEM;
+	}
+	if (src->label == NULL)
+		dst->label = NULL;
+	else {
+		dst->label = strdup(src->label);
+		if (!dst->label) {
+			free(dst->name);
+			return -ENOMEM;
+		}
+	}
+	dst->total_devs = src->total_devs;
+	dst->super_bytes_used = src->super_bytes_used;
+	dst->total_bytes = src->total_bytes;
+	dst->bytes_used = src->bytes_used;
+	dst->generation = src->generation;
+
+	return 0;
+}
+
+static int copy_fs_devices(struct btrfs_fs_devices *dst,
+			   struct btrfs_fs_devices *src)
+{
+	struct btrfs_device *cur_dev, *dev_copy;
+	int ret = 0;
+
+	memcpy(dst->fsid, src->fsid, BTRFS_FSID_SIZE);
+	INIT_LIST_HEAD(&dst->devices);
+	dst->seed = NULL;
+
+	list_for_each_entry(cur_dev, &src->devices, dev_list) {
+		dev_copy = malloc(sizeof(*dev_copy));
+		if (!dev_copy) {
+			ret = -ENOMEM;
+			break;
+		}
+
+		ret = copy_device(dev_copy, cur_dev);
+		if (ret) {
+			free(dev_copy);
+			break;
+		}
+
+		list_add(&dev_copy->dev_list, &dst->devices);
+		dev_copy->fs_devices = dst;
+	}
+
+	return ret;
+}
+
+static int find_and_copy_seed(struct btrfs_fs_devices *seed,
+			      struct btrfs_fs_devices *copy,
+			      struct list_head *fs_uuids) {
+	struct btrfs_fs_devices *cur_fs;
+
+	list_for_each_entry(cur_fs, fs_uuids, list)
+		if (!memcmp(seed->fsid, cur_fs->fsid, BTRFS_FSID_SIZE))
+			return copy_fs_devices(copy, cur_fs);
+
+	return 1;
+}
+
+static int has_seed_devices(struct btrfs_fs_devices *fs_devices)
+{
+	struct btrfs_device *device;
+	int dev_cnt_total, dev_cnt = 0;
+
+	device = list_first_entry(&fs_devices->devices, struct btrfs_device,
+				  dev_list);
+
+	dev_cnt_total = device->total_devs;
+
+	list_for_each_entry(device, &fs_devices->devices, dev_list)
+		dev_cnt++;
+
+	return dev_cnt_total != dev_cnt;
+}
+
+static int search_umounted_fs_uuids(struct list_head *all_uuids,
+				    char *search, int *found)
+{
+	struct btrfs_fs_devices *cur_fs, *fs_copy;
+	struct list_head *fs_uuids;
+	int ret = 0;
+
+	fs_uuids = btrfs_scanned_uuids();
+
+	/*
+	 * The fs_uuids list is global, and open_ctree_* will
+	 * modify it, make a private copy here
+	 */
+	list_for_each_entry(cur_fs, fs_uuids, list) {
+		/* don't bother handle all fs, if search target specified */
+		if (search) {
+			if (uuid_search(cur_fs, search) == 0)
+				continue;
+			if (found)
+				*found = 1;
+		}
+
+		/* skip all fs already shown as mounted fs */
+		if (is_seen_fsid(cur_fs->fsid))
+			continue;
+
+		fs_copy = malloc(sizeof(*fs_copy));
+		if (!fs_copy) {
+			ret = -ENOMEM;
+			goto out;
+		}
+
+		ret = copy_fs_devices(fs_copy, cur_fs);
+		if (ret) {
+			free(fs_copy);
+			goto out;
+		}
+
+		list_add(&fs_copy->list, all_uuids);
+	}
+
+out:
+	return ret;
+}
+
+static int map_seed_devices(struct list_head *all_uuids)
+{
+	struct btrfs_fs_devices *cur_fs, *cur_seed;
+	struct btrfs_fs_devices *seed_copy;
+	struct btrfs_fs_devices *opened_fs;
+	struct btrfs_device *device;
+	struct btrfs_fs_info *fs_info;
+	struct list_head *fs_uuids;
+	int ret = 0;
+
+	fs_uuids = btrfs_scanned_uuids();
+
+	list_for_each_entry(cur_fs, all_uuids, list) {
+		device = list_first_entry(&cur_fs->devices,
+						struct btrfs_device, dev_list);
+		if (!device)
+			continue;
+
+		/* skip fs without seeds */
+		if (!has_seed_devices(cur_fs))
+			continue;
+
+		/*
+		 * open_ctree_* detects seed/sprout mapping
+		 */
+		fs_info = open_ctree_fs_info(device->name, 0, 0,
+						OPEN_CTREE_PARTIAL);
+		if (!fs_info)
+			continue;
+
+		/*
+		 * copy the seed chain under the opened fs
+		 */
+		opened_fs = fs_info->fs_devices;
+		cur_seed = cur_fs;
+		while (opened_fs->seed) {
+			seed_copy = malloc(sizeof(*seed_copy));
+			if (!seed_copy) {
+				ret = -ENOMEM;
+				goto fail_out;
+			}
+			ret = find_and_copy_seed(opened_fs->seed, seed_copy,
+						 fs_uuids);
+			if (ret) {
+				free(seed_copy);
+				goto fail_out;
+			}
+
+			cur_seed->seed = seed_copy;
+
+			opened_fs = opened_fs->seed;
+			cur_seed = cur_seed->seed;
+		}
+
+		close_ctree(fs_info->chunk_root);
+	}
+
+out:
+	return ret;
+fail_out:
+	close_ctree(fs_info->chunk_root);
+	goto out;
+}
+
 static const char * const cmd_show_usage[] = {
 	"btrfs filesystem show [options] [<path>|<uuid>|<device>|label]",
 	"Show the structure of a filesystem",
@@ -542,12 +822,12 @@ static const char * const cmd_show_usage[] = {
 
 static int cmd_show(int argc, char **argv)
 {
-	struct list_head *all_uuids;
+	LIST_HEAD(all_uuids);
 	struct btrfs_fs_devices *fs_devices;
-	struct list_head *cur_uuid;
 	char *search = NULL;
 	int ret;
-	int where = BTRFS_SCAN_LBLKID;
+	/* default, search both kernel and udev */
+	int where = -1;
 	int type = 0;
 	char mp[BTRFS_PATH_NAME_MAX + 1];
 	char path[PATH_MAX];
@@ -557,10 +837,10 @@ static int cmd_show(int argc, char **argv)
 
 	while (1) {
 		int long_index;
-		static struct option long_options[] = {
+		static const struct option long_options[] = {
 			{ "all-devices", no_argument, NULL, 'd'},
 			{ "mounted", no_argument, NULL, 'm'},
-			{ NULL, no_argument, NULL, 0 },
+			{ NULL, 0, NULL, 0 }
 		};
 		int c = getopt_long(argc, argv, "dm", long_options,
 					&long_index);
@@ -568,7 +848,7 @@ static int cmd_show(int argc, char **argv)
 			break;
 		switch (c) {
 		case 'd':
-			where = BTRFS_SCAN_DEV;
+			where = BTRFS_SCAN_LBLKID;
 			break;
 		case 'm':
 			where = BTRFS_SCAN_MOUNTED;
@@ -586,44 +866,45 @@ static int cmd_show(int argc, char **argv)
 		if (strlen(search) == 0)
 			usage(cmd_show_usage);
 		type = check_arg_type(search);
+
 		/*
-		 * needs spl handling if input arg is block dev
-		 * And if input arg is mount-point just print it
-		 * right away
+		 * For search is a device:
+		 *     realpath do /dev/mapper/XX => /dev/dm-X
+		 *     which is required by BTRFS_SCAN_DEV
+		 * For search is a mountpoint:
+		 *     realpath do  /mnt/btrfs/  => /mnt/btrfs
+		 *     which shall be recognized by btrfs_scan_kernel()
 		 */
-		if (type == BTRFS_ARG_BLKDEV) {
-			if (where == BTRFS_SCAN_DEV) {
-				/* we need to do this because
-				 * legacy BTRFS_SCAN_DEV
-				 * provides /dev/dm-x paths
-				 */
-				if (realpath(search, path))
-					search = path;
+		if (realpath(search, path))
+			search = path;
+
+		/*
+		 * Needs special handling if input arg is block dev And if
+		 * input arg is mount-point just print it right away
+		 */
+		if (type == BTRFS_ARG_BLKDEV && where != BTRFS_SCAN_LBLKID) {
+			ret = get_btrfs_mount(search, mp, sizeof(mp));
+			if (!ret) {
+				/* given block dev is mounted */
+				search = mp;
+				type = BTRFS_ARG_MNTPOINT;
 			} else {
-				ret = get_btrfs_mount(search,
-						mp, sizeof(mp));
-				if (!ret) {
-					/* given block dev is mounted*/
-					search = mp;
-					type = BTRFS_ARG_MNTPOINT;
-				} else {
-					ret = dev_to_fsid(search, fsid);
-					if (ret) {
-						fprintf(stderr,
-							"ERROR: No btrfs on %s\n",
-							search);
-						return 1;
-					}
-					uuid_unparse(fsid, uuid_buf);
-					search = uuid_buf;
-					type = BTRFS_ARG_UUID;
-					goto devs_only;
+				ret = dev_to_fsid(search, fsid);
+				if (ret) {
+					fprintf(stderr,
+						"ERROR: No btrfs on %s\n",
+						search);
+					return 1;
 				}
+				uuid_unparse(fsid, uuid_buf);
+				search = uuid_buf;
+				type = BTRFS_ARG_UUID;
+				goto devs_only;
 			}
 		}
 	}
 
-	if (where == BTRFS_SCAN_DEV)
+	if (where == BTRFS_SCAN_LBLKID)
 		goto devs_only;
 
 	/* show mounted btrfs */
@@ -638,33 +919,44 @@ static int cmd_show(int argc, char **argv)
 		goto out;
 
 devs_only:
-	ret = scan_for_btrfs(where, !BTRFS_UPDATE_KERNEL);
+	ret = btrfs_scan_lblkid();
 
 	if (ret) {
 		fprintf(stderr, "ERROR: %d while scanning\n", ret);
 		return 1;
 	}
-	
-	all_uuids = btrfs_scanned_uuids();
-	list_for_each(cur_uuid, all_uuids) {
-		fs_devices = list_entry(cur_uuid, struct btrfs_fs_devices,
-					list);
-		if (search && uuid_search(fs_devices, search) == 0)
-			continue;
 
-		print_one_uuid(fs_devices);
-		found = 1;
+	ret = search_umounted_fs_uuids(&all_uuids, search, &found);
+	if (ret < 0) {
+		fprintf(stderr,
+			"ERROR: %d while searching target device\n", ret);
+		return 1;
 	}
+
+	/*
+	 * The seed/sprout mapping are not detected yet,
+	 * do mapping build for all umounted fs
+	 */
+	ret = map_seed_devices(&all_uuids);
+	if (ret) {
+		fprintf(stderr,
+			"ERROR: %d while mapping seed devices\n", ret);
+		return 1;
+	}
+
+	list_for_each_entry(fs_devices, &all_uuids, list)
+		print_one_uuid(fs_devices);
+
 	if (search && !found)
 		ret = 1;
 
-	while (!list_empty(all_uuids)) {
-		fs_devices = list_entry(all_uuids->next,
+	while (!list_empty(&all_uuids)) {
+		fs_devices = list_entry(all_uuids.next,
 					struct btrfs_fs_devices, list);
-		btrfs_close_devices(fs_devices);
+		free_fs_devices(fs_devices);
 	}
 out:
-	printf("%s\n", BTRFS_BUILD_VERSION);
+	printf("%s\n", PACKAGE_STRING);
 	free_seen_fsid();
 	return ret;
 }
@@ -920,7 +1212,7 @@ static int cmd_defrag(int argc, char **argv)
 		}
 	}
 	if (defrag_global_verbose)
-		printf("%s\n", BTRFS_BUILD_VERSION);
+		printf("%s\n", PACKAGE_STRING);
 	if (defrag_global_errors)
 		fprintf(stderr, "total %d failures\n", defrag_global_errors);
 
@@ -1004,13 +1296,16 @@ static int cmd_label(int argc, char **argv)
 
 const struct cmd_group filesystem_cmd_group = {
 	filesystem_cmd_group_usage, NULL, {
-		{ "df", cmd_df, cmd_df_usage, NULL, 0 },
+		{ "df", cmd_filesystem_df, cmd_filesystem_df_usage, NULL, 0 },
 		{ "show", cmd_show, cmd_show_usage, NULL, 0 },
 		{ "sync", cmd_sync, cmd_sync_usage, NULL, 0 },
 		{ "defragment", cmd_defrag, cmd_defrag_usage, NULL, 0 },
 		{ "balance", cmd_balance, NULL, &balance_cmd_group, 1 },
 		{ "resize", cmd_resize, cmd_resize_usage, NULL, 0 },
 		{ "label", cmd_label, cmd_label_usage, NULL, 0 },
+		{ "usage", cmd_filesystem_usage,
+			cmd_filesystem_usage_usage, NULL, 0 },
+
 		NULL_CMD_STRUCT
 	}
 };

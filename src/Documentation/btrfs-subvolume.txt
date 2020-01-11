@@ -31,7 +31,7 @@ When `mount`(8) using 'subvol' or 'subvolid' mount option, one can access
 files/directories/subvolumes inside it, but nothing in parent subvolumes.
 
 Also every btrfs filesystem has a default subvolume as its initially top-level
-subvolume, whose subvolume id is 5(FS_TREE).
+subvolume, whose subvolume id is 5. (0 is also acceptable as an alias.)
 
 A btrfs snapshot is much like a subvolume, but shares its data(and metadata)
 with other subvolume/snapshot. Due to the capabilities of COW, modifications
@@ -74,6 +74,14 @@ wait for transaction commit at the end of the operation
 +
 -C|--commit-each::::
 wait for transaction commit after delet each subvolume
+
+*find-new* <subvolume> <last_gen>::
+List the recently modified files in a subvolume, after <last_gen> ID.
+
+*get-default* <path>::
+Get the default subvolume of the filesystem <path>.
++
+The output format is similar to *subvolume list* command.
 
 *list* [options] [-G [\+|-]<value>] [-C [+|-]<value>] [--sort=rootid,gen,ogen,path] <path>::
 List the subvolumes present in the filesystem <path>.
@@ -127,6 +135,16 @@ you can add \'\+' or \'-' in front of each items, \'+' means ascending,
 for --sort you can combine some items together by \',', just like
 -sort=+ogen,-gen,path,rootid.
 
+*set-default* <id> <path>::
+Set the subvolume of the filesystem <path> which is mounted as
+default.
++
+The subvolume is identified by <id>, which is returned by the *subvolume list*
+command.
+
+*show* <path>::
+Show information of a given subvolume in the <path>.
+
 *snapshot* [-r] <source> <dest>|[<dest>/]<name>::
 Create a writable/readonly snapshot of the subvolume <source> with the
 name <name> in the <dest> directory.
@@ -135,27 +153,20 @@ If only <dest> is given, the subvolume will be named the basename of <source>.
 If <source> is not a subvolume, btrfs returns an error.
 If '-r' is given, the snapshot will be readonly.
 
-*get-default* <path>::
-Get the default subvolume of the filesystem <path>.
+*sync* <path> [subvolid...]::
+Wait until given subvolume(s) are completely removed from the filesystem
+after deletion. If no subvolume id is given, wait until all ongoing deletion
+requests are complete. This may take long if new deleted subvolumes appear
+during the sleep interval.
 +
-The output format is similar to *subvolume list* command.
-
-*set-default* <id> <path>::
-Set the subvolume of the filesystem <path> which is mounted as
-default.
+`Options`
 +
-The subvolume is identified by <id>, which is returned by the *subvolume list*
-command.
-
-*find-new* <subvolume> <last_gen>::
-List the recently modified files in a subvolume, after <last_gen> ID.
-
-*show* <path>::
-Show information of a given subvolume in the <path>.
+-s <N>::::
+sleep N seconds between checks (default: 1)
 
 EXIT STATUS
 -----------
-*btrfs subvolume* returns a zero exit status if it succeeds. Non zero is
+*btrfs subvolume* returns a zero exit status if it succeeds. A non-zero value is
 returned in case of failure.
 
 AVAILABILITY

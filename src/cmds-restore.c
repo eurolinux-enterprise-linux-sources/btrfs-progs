@@ -16,8 +16,6 @@
  * Boston, MA 021110-1307, USA.
  */
 
-#define _XOPEN_SOURCE 500
-#define _GNU_SOURCE 1
 
 #include "kerncompat.h"
 
@@ -41,7 +39,6 @@
 #include "print-tree.h"
 #include "transaction.h"
 #include "list.h"
-#include "version.h"
 #include "volumes.h"
 #include "utils.h"
 #include "commands.h"
@@ -114,6 +111,8 @@ static int decompress_lzo(unsigned char *inbuf, char *outbuf, u64 compress_len,
 	tot_in = LZO_LEN;
 
 	while (tot_in < tot_len) {
+		size_t mod_page;
+		size_t rem_page;
 		in_len = read_compress_length(inbuf);
 
 		if ((tot_in + LZO_LEN + in_len) > tot_len) {
@@ -137,6 +136,17 @@ static int decompress_lzo(unsigned char *inbuf, char *outbuf, u64 compress_len,
 		outbuf += new_len;
 		inbuf += in_len;
 		tot_in += in_len;
+
+		/*
+		 * If the 4 byte header does not fit to the rest of the page we
+		 * have to move to the next one, unless we read some garbage
+		 */
+		mod_page = tot_in % PAGE_CACHE_SIZE;
+		rem_page = PAGE_CACHE_SIZE - mod_page;
+		if (rem_page < LZO_LEN) {
+			inbuf += rem_page;
+			tot_in += rem_page;
+		}
 	}
 
 	*decompress_len = out_len;
@@ -176,7 +186,7 @@ again:
 			break;
 	}
 
-	if (level == BTRFS_MAX_LEVEL)
+	if (level >= BTRFS_MAX_LEVEL)
 		return 1;
 
 	slot = path->slots[level] + 1;
@@ -199,7 +209,7 @@ again:
 			reada_for_search(root, path, level, slot, 0);
 
 		next = read_node_slot(root, c, slot);
-		if (next)
+		if (extent_buffer_uptodate(next))
 			break;
 		offset++;
 	}
@@ -215,7 +225,7 @@ again:
 		if (path->reada)
 			reada_for_search(root, path, level, 0, 0);
 		next = read_node_slot(root, next, 0);
-		if (!next)
+		if (!extent_buffer_uptodate(next))
 			goto again;
 	}
 	return 0;
@@ -840,6 +850,8 @@ static int search_dir(struct btrfs_root *root, struct btrfs_key *key,
 			ret = copy_file(root, fd, &location, path_name);
 			close(fd);
 			if (ret) {
+				fprintf(stderr, "Error copying data for %s\n",
+					path_name);
 				if (ignore_errors)
 					goto next;
 				btrfs_free_path(path);
@@ -917,6 +929,8 @@ static int search_dir(struct btrfs_root *root, struct btrfs_key *key,
 					 output_rootdir, dir, mreg);
 			free(dir);
 			if (ret) {
+				fprintf(stderr, "Error searching %s\n",
+					path_name);
 				if (ignore_errors)
 					goto next;
 				btrfs_free_path(path);
@@ -963,8 +977,9 @@ static int do_list_roots(struct btrfs_root *root)
 		return -1;
 	}
 
+	leaf = path->nodes[0];
+
 	while (1) {
-		leaf = path->nodes[0];
 		slot = path->slots[0];
 		if (slot >= btrfs_header_nritems(leaf)) {
 			ret = btrfs_next_leaf(root, path);
@@ -1117,12 +1132,6 @@ out:
 	return ret;
 }
 
-static struct option long_options[] = {
-	{ "path-regex", 1, NULL, 256},
-	{ "dry-run", 0, NULL, 'D'},
-	{ NULL, 0, NULL, 0}
-};
-
 const char * const cmd_restore_usage[] = {
 	"btrfs restore [options] <device> <path> | -l <device>",
 	"Try to restore files from a damaged filesystem (unmounted)",
@@ -1157,8 +1166,6 @@ int cmd_restore(int argc, char **argv)
 	u64 root_objectid = 0;
 	int len;
 	int ret;
-	int opt;
-	int option_index = 0;
 	int super_mirror = 0;
 	int find_dir = 0;
 	int list_roots = 0;
@@ -1167,8 +1174,19 @@ int cmd_restore(int argc, char **argv)
 	regex_t match_reg, *mreg = NULL;
 	char reg_err[256];
 
-	while ((opt = getopt_long(argc, argv, "sxviot:u:df:r:lDc", long_options,
-					&option_index)) != -1) {
+	while (1) {
+		int opt;
+		int option_index = 0;
+		static const struct option long_options[] = {
+			{ "path-regex", 1, NULL, 256},
+			{ "dry-run", 0, NULL, 'D'},
+			{ NULL, 0, NULL, 0}
+		};
+
+		opt = getopt_long(argc, argv, "sxviot:u:df:r:lDc", long_options,
+					&option_index);
+		if (opt < 0)
+			break;
 
 		switch (opt) {
 			case 's':
@@ -1258,7 +1276,7 @@ int cmd_restore(int argc, char **argv)
 	if (fs_location != 0) {
 		free_extent_buffer(root->node);
 		root->node = read_tree_block(root, fs_location, root->leafsize, 0);
-		if (!root->node) {
+		if (!extent_buffer_uptodate(root->node)) {
 			fprintf(stderr, "Failed to read fs location\n");
 			ret = 1;
 			goto out;
