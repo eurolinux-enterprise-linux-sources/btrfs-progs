@@ -82,7 +82,7 @@ static struct btrfs_root *open_ctree_broken(int fd, const char *device)
 		return NULL;
 	}
 
-	ret = btrfs_scan_fs_devices(fd, device, &fs_devices, 0, 1);
+	ret = btrfs_scan_fs_devices(fd, device, &fs_devices, 0, 1, 1);
 	if (ret)
 		goto out;
 
@@ -94,7 +94,7 @@ static struct btrfs_root *open_ctree_broken(int fd, const char *device)
 
 	disk_super = fs_info->super_copy;
 	ret = btrfs_read_dev_super(fs_devices->latest_bdev,
-				   disk_super, fs_info->super_bytenr);
+				   disk_super, fs_info->super_bytenr, 1);
 	if (ret) {
 		printk("No valid btrfs found\n");
 		goto out_devices;
@@ -112,8 +112,7 @@ static struct btrfs_root *open_ctree_broken(int fd, const char *device)
 
 	eb = fs_info->chunk_root->node;
 	read_extent_buffer(eb, fs_info->chunk_tree_uuid,
-			   (unsigned long)btrfs_header_chunk_tree_uuid(eb),
-			   BTRFS_UUID_SIZE);
+			   btrfs_header_chunk_tree_uuid(eb), BTRFS_UUID_SIZE);
 
 	return fs_info->chunk_root;
 out_chunk:
@@ -288,32 +287,14 @@ int main(int argc, char **argv)
 
 	while ((opt = getopt(argc, argv, "l:o:g:")) != -1) {
 		switch(opt) {
-			errno = 0;
 			case 'o':
-				search_objectid = (u64)strtoll(optarg, NULL,
-							       10);
-				if (errno) {
-					fprintf(stderr, "Error parsing "
-						"objectid\n");
-					exit(1);
-				}
+				search_objectid = arg_strtou64(optarg);
 				break;
 			case 'g':
-				search_generation = (u64)strtoll(optarg, NULL,
-							       10);
-				if (errno) {
-					fprintf(stderr, "Error parsing "
-						"generation\n");
-					exit(1);
-				}
+				search_generation = arg_strtou64(optarg);
 				break;
 			case 'l':
-				search_level = strtol(optarg, NULL, 10);
-				if (errno) {
-					fprintf(stderr, "Error parsing "
-						"level\n");
-					exit(1);
-				}
+				search_level = arg_strtou64(optarg);
 				break;
 			default:
 				usage();
@@ -321,7 +302,9 @@ int main(int argc, char **argv)
 		}
 	}
 
-	if (optind >= argc) {
+	set_argv0(argv);
+	argc = argc - optind;
+	if (check_argc_min(argc, 1)) {
 		usage();
 		exit(1);
 	}

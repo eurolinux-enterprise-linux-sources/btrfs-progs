@@ -1418,7 +1418,6 @@ int btrfs_inc_extent_ref(struct btrfs_trans_handle *trans,
 		return -ENOMEM;
 
 	path->reada = 1;
-	path->leave_spinning = 1;
 
 	ret = insert_inline_extent_backref(trans, root->fs_info->extent_root,
 					   path, bytenr, num_bytes, parent,
@@ -1440,7 +1439,6 @@ int btrfs_inc_extent_ref(struct btrfs_trans_handle *trans,
 	btrfs_release_path(path);
 
 	path->reada = 1;
-	path->leave_spinning = 1;
 
 	/* now insert the actual backref */
 	ret = insert_extent_backref(trans, root->fs_info->extent_root,
@@ -1560,7 +1558,7 @@ again:
 		*flags = extent_flags;
 out:
 	btrfs_free_path(path);
-	return 0;
+	return ret;
 }
 
 int btrfs_set_block_flags(struct btrfs_trans_handle *trans,
@@ -2195,7 +2193,6 @@ static int __free_extent(struct btrfs_trans_handle *trans,
 		return -ENOMEM;
 
 	path->reada = 1;
-	path->leave_spinning = 1;
 
 	is_data = owner_objectid >= BTRFS_FIRST_FREE_OBJECTID;
 	if (is_data)
@@ -2239,7 +2236,6 @@ static int __free_extent(struct btrfs_trans_handle *trans,
 						    is_data);
 			BUG_ON(ret);
 			btrfs_release_path(path);
-			path->leave_spinning = 1;
 
 			key.objectid = bytenr;
 
@@ -2304,7 +2300,6 @@ static int __free_extent(struct btrfs_trans_handle *trans,
 		BUG_ON(ret < 0);
 
 		btrfs_release_path(path);
-		path->leave_spinning = 1;
 
 		key.objectid = bytenr;
 		key.type = BTRFS_EXTENT_ITEM_KEY;
@@ -2711,7 +2706,6 @@ static int alloc_reserved_tree_block(struct btrfs_trans_handle *trans,
 	path = btrfs_alloc_path();
 	BUG_ON(!path);
 
-	path->leave_spinning = 1;
 	ret = btrfs_insert_empty_item(trans, fs_info->extent_root, path,
 				      ins, size);
 	BUG_ON(ret);
@@ -3090,8 +3084,7 @@ int btrfs_free_block_groups(struct btrfs_fs_info *info)
 			break;
 		ret = get_state_private(&info->block_group_cache, start, &ptr);
 		if (!ret) {
-			cache = (struct btrfs_block_group_cache *)
-					(uintptr_t)ptr;
+			cache = u64_to_ptr(ptr);
 			if (cache->free_space_ctl) {
 				btrfs_remove_free_space_cache(cache);
 				kfree(cache->free_space_ctl);

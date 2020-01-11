@@ -285,7 +285,7 @@ static void print_fs_stat(struct scrub_fs_stat *fs_stat, int raw)
 static void free_history(struct scrub_file_record **last_scrubs)
 {
 	struct scrub_file_record **l = last_scrubs;
-	if (!l)
+	if (!l || IS_ERR(l))
 		return;
 	while (*l)
 		free(*l++);
@@ -474,9 +474,6 @@ static struct scrub_file_record **scrub_read_file(int fd, int report_errors)
 	char empty_uuid[BTRFS_FSID_SIZE] = {0};
 	struct scrub_file_record **p = NULL;
 
-	if (fd < 0)
-		return ERR_PTR(-EINVAL);
-
 again:
 	old_avail = avail - i;
 	BUG_ON(old_avail < 0);
@@ -553,7 +550,7 @@ again:
 				;
 			if (i + j + 1 >= avail)
 				_SCRUB_INVALID;
-			if (j != 36)
+			if (j != BTRFS_UUID_UNPARSED_SIZE - 1)
 				_SCRUB_INVALID;
 			l[i + j] = '\0';
 			ret = uuid_parse(l + i, p[curr]->fsid);
@@ -773,31 +770,31 @@ static int scrub_write_progress(pthread_mutex_t *m, const char *fsid,
 	int fd = -1;
 	int old;
 
-	ret = pthread_mutex_lock(m);
-	if (ret) {
-		err = -ret;
-		goto out;
-	}
-
 	ret = pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &old);
 	if (ret) {
 		err = -ret;
-		goto out;
+		goto out3;
+	}
+
+	ret = pthread_mutex_lock(m);
+	if (ret) {
+		err = -ret;
+		goto out2;
 	}
 
 	fd = scrub_open_file_w(SCRUB_DATA_FILE, fsid, "tmp");
 	if (fd < 0) {
 		err = fd;
-		goto out;
+		goto out1;
 	}
 	err = scrub_write_file(fd, fsid, data, n);
 	if (err)
-		goto out;
+		goto out1;
 	err = scrub_rename_file(SCRUB_DATA_FILE, fsid, "tmp");
 	if (err)
-		goto out;
+		goto out1;
 
-out:
+out1:
 	if (fd >= 0) {
 		ret = close(fd);
 		if (ret)
@@ -808,10 +805,12 @@ out:
 	if (ret && !err)
 		err = -ret;
 
+out2:
 	ret = pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, &old);
 	if (ret && !err)
 		err = -ret;
 
+out3:
 	return err;
 }
 
@@ -863,11 +862,11 @@ static void *progress_one_dev(void *ctx)
 /* nb: returns a negative errno via ERR_PTR */
 static void *scrub_progress_cycle(void *ctx)
 {
-	int ret;
+	int ret = 0;
 	int  perr = 0;	/* positive / pthread error returns */
 	int old;
 	int i;
-	char fsid[37];
+	char fsid[BTRFS_UUID_UNPARSED_SIZE];
 	struct scrub_progress *sp;
 	struct scrub_progress *sp_last;
 	struct scrub_progress *sp_shared;
@@ -943,6 +942,10 @@ static void *scrub_progress_cycle(void *ctx)
 			 * result we got for the current write and go
 			 * on. flag should be set on next cycle, then.
 			 */
+			perr = pthread_setcancelstate(
+					PTHREAD_CANCEL_DISABLE, &old);
+			if (perr)
+				goto out;
 			perr = pthread_mutex_lock(&sp_shared->progress_mutex);
 			if (perr)
 				goto out;
@@ -951,10 +954,18 @@ static void *scrub_progress_cycle(void *ctx)
 						&sp_shared->progress_mutex);
 				if (perr)
 					goto out;
+				perr = pthread_setcancelstate(
+						PTHREAD_CANCEL_ENABLE, &old);
+				if (perr)
+					goto out;
 				memcpy(sp, sp_last, sizeof(*sp));
 				continue;
 			}
 			perr = pthread_mutex_unlock(&sp_shared->progress_mutex);
+			if (perr)
+				goto out;
+			perr = pthread_setcancelstate(
+					PTHREAD_CANCEL_ENABLE, &old);
 			if (perr)
 				goto out;
 			memcpy(sp, sp_shared, sizeof(*sp));
@@ -1085,20 +1096,21 @@ static int scrub_start(int argc, char **argv, int resume)
 	};
 	pthread_t *t_devs = NULL;
 	pthread_t t_prog;
-	pthread_attr_t t_attr;
 	struct scrub_file_record **past_scrubs = NULL;
 	struct scrub_file_record *last_scrub = NULL;
 	char *datafile = strdup(SCRUB_DATA_FILE);
-	char fsid[37];
+	char fsid[BTRFS_UUID_UNPARSED_SIZE];
 	char sock_path[BTRFS_PATH_NAME_MAX + 1] = "";
 	struct scrub_progress_cycle spc;
 	pthread_mutex_t spc_write_mutex = PTHREAD_MUTEX_INITIALIZER;
 	void *terr;
 	u64 devid;
 	DIR *dirstream = NULL;
+	int force = 0;
+	int nothing_to_resume = 0;
 
 	optind = 1;
-	while ((c = getopt(argc, argv, "BdqrRc:n:")) != -1) {
+	while ((c = getopt(argc, argv, "BdqrRc:n:f")) != -1) {
 		switch (c) {
 		case 'B':
 			do_background = 0;
@@ -1122,6 +1134,9 @@ static int scrub_start(int argc, char **argv, int resume)
 			break;
 		case 'n':
 			ioprio_classdata = (int)strtol(optarg, NULL, 10);
+			break;
+		case 'f':
+			force = 1;
 			break;
 		case '?':
 		default:
@@ -1154,7 +1169,13 @@ static int scrub_start(int argc, char **argv, int resume)
 	fdmnt = open_path_or_dev_mnt(path, &dirstream);
 
 	if (fdmnt < 0) {
-		ERR(!do_quiet, "ERROR: can't access '%s'\n", path);
+		if (errno == EINVAL)
+			ERR(!do_quiet,
+			    "ERROR: '%s' is not a mounted btrfs device\n",
+			    path);
+		else
+			ERR(!do_quiet, "ERROR: can't access '%s': %s\n",
+			    path, strerror(errno));
 		return 1;
 	}
 
@@ -1195,7 +1216,7 @@ static int scrub_start(int argc, char **argv, int resume)
 	 * is a normal mode of operation to start scrub on multiple
 	 * single devices, there is no reason to prevent this.
 	 */
-	if (is_scrub_running_on_fs(&fi_args, di_args, past_scrubs)) {
+	if (!force && is_scrub_running_on_fs(&fi_args, di_args, past_scrubs)) {
 		ERR(!do_quiet,
 		    "ERROR: scrub is already running.\n"
 		    "To cancel use 'btrfs scrub cancel %s'.\n"
@@ -1211,14 +1232,6 @@ static int scrub_start(int argc, char **argv, int resume)
 
 	if (!t_devs || !sp || !spc.progress) {
 		ERR(!do_quiet, "ERROR: scrub failed: %s", strerror(errno));
-		err = 1;
-		goto out;
-	}
-
-	ret = pthread_attr_init(&t_attr);
-	if (ret) {
-		ERR(!do_quiet, "ERROR: pthread_attr_init failed: %s\n",
-		    strerror(ret));
 		err = 1;
 		goto out;
 	}
@@ -1261,7 +1274,8 @@ static int scrub_start(int argc, char **argv, int resume)
 		if (!do_quiet)
 			printf("scrub: nothing to resume for %s, fsid %s\n",
 			       path, fsid);
-		return 2;
+		nothing_to_resume = 1;
+		goto out;
 	}
 
 	ret = prg_fd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -1369,7 +1383,7 @@ static int scrub_start(int argc, char **argv, int resume)
 		devid = di_args[i].devid;
 		gettimeofday(&tv, NULL);
 		sp[i].stats.t_start = tv.tv_sec;
-		ret = pthread_create(&t_devs[i], &t_attr,
+		ret = pthread_create(&t_devs[i], NULL,
 					scrub_one_dev, &sp[i]);
 		if (ret) {
 			if (do_print)
@@ -1387,7 +1401,7 @@ static int scrub_start(int argc, char **argv, int resume)
 	spc.write_mutex = &spc_write_mutex;
 	spc.shared_progress = sp;
 	spc.fi = &fi_args;
-	ret = pthread_create(&t_prog, &t_attr, scrub_progress_cycle, &spc);
+	ret = pthread_create(&t_prog, NULL, scrub_progress_cycle, &spc);
 	if (ret) {
 		if (do_print)
 			fprintf(stderr, "ERROR: creating progress thread "
@@ -1499,24 +1513,31 @@ out:
 
 	if (err)
 		return 1;
-	if (e_correctable)
+	if (nothing_to_resume)
+		return 2;
+	if (e_uncorrectable) {
+		ERR(!do_quiet, "ERROR: There are uncorrectable errors.\n");
 		return 3;
-	if (e_uncorrectable)
-		return 4;
+	}
+	if (e_correctable)
+		ERR(!do_quiet, "WARNING: errors detected during scrubbing, corrected.\n");
+
 	return 0;
 }
 
 static const char * const cmd_scrub_start_usage[] = {
-	"btrfs scrub start [-BdqrR] [-c ioprio_class -n ioprio_classdata] <path>|<device>",
-	"Start a new scrub",
+	"btrfs scrub start [-BdqrRf] [-c ioprio_class -n ioprio_classdata] <path>|<device>",
+	"Start a new scrub. If a scrub is already running, the new one fails.",
 	"",
 	"-B     do not background",
 	"-d     stats per device (-B only)",
 	"-q     be quiet",
 	"-r     read only mode",
-	"-R     raw print mode, print full data instead of summary"
+	"-R     raw print mode, print full data instead of summary",
 	"-c     set ioprio class (see ionice(1) manpage)",
 	"-n     set ioprio classdata (see ionice(1) manpage)",
+	"-f     force starting new scrub even if a scrub is already running",
+	"       this is useful when scrub stats record file is damaged",
 	NULL
 };
 
@@ -1545,8 +1566,13 @@ static int cmd_scrub_cancel(int argc, char **argv)
 
 	fdmnt = open_path_or_dev_mnt(path, &dirstream);
 	if (fdmnt < 0) {
-		fprintf(stderr, "ERROR: could not open %s: %s\n",
-			path, strerror(errno));
+		if (errno == EINVAL)
+			fprintf(stderr,
+				"ERROR: '%s' is not a mounted btrfs device\n",
+				path);
+		else
+			fprintf(stderr, "ERROR: can't access '%s': %s\n",
+				path, strerror(errno));
 		ret = 1;
 		goto out;
 	}
@@ -1579,6 +1605,7 @@ static const char * const cmd_scrub_resume_usage[] = {
 	"-d     stats per device (-B only)",
 	"-q     be quiet",
 	"-r     read only mode",
+	"-R     raw print mode, print full data instead of summary",
 	"-c     set ioprio class (see ionice(1) manpage)",
 	"-n     set ioprio classdata (see ionice(1) manpage)",
 	NULL
@@ -1615,7 +1642,7 @@ static int cmd_scrub_status(int argc, char **argv)
 	int print_raw = 0;
 	int do_stats_per_dev = 0;
 	int c;
-	char fsid[37];
+	char fsid[BTRFS_UUID_UNPARSED_SIZE];
 	int fdres = -1;
 	int err = 0;
 	DIR *dirstream = NULL;
@@ -1643,7 +1670,13 @@ static int cmd_scrub_status(int argc, char **argv)
 	fdmnt = open_path_or_dev_mnt(path, &dirstream);
 
 	if (fdmnt < 0) {
-		fprintf(stderr, "ERROR: can't access to '%s'\n", path);
+		if (errno == EINVAL)
+			fprintf(stderr,
+				"ERROR: '%s' is not a mounted btrfs device\n",
+				path);
+		else
+			fprintf(stderr, "ERROR: can't access '%s': %s\n",
+				path, strerror(errno));
 		return 1;
 	}
 

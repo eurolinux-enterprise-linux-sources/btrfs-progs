@@ -134,7 +134,7 @@ static int cmd_start_replace(int argc, char **argv)
 	int fddstdev = -1;
 	char *path;
 	char *srcdev;
-	char *dstdev;
+	char *dstdev = NULL;
 	int avoid_reading_from_srcdev = 0;
 	int force_using_targetdev = 0;
 	struct stat st;
@@ -172,8 +172,13 @@ static int cmd_start_replace(int argc, char **argv)
 	fdmnt = open_path_or_dev_mnt(path, &dirstream);
 
 	if (fdmnt < 0) {
-		fprintf(stderr, "ERROR: can't access \"%s\": %s\n",
-			path, strerror(errno));
+		if (errno == EINVAL)
+			fprintf(stderr,
+				"ERROR: '%s' is not a mounted btrfs device\n",
+				path);
+		else
+			fprintf(stderr, "ERROR: can't access '%s': %s\n",
+				path, strerror(errno));
 		goto leave_with_error;
 	}
 
@@ -204,18 +209,18 @@ static int cmd_start_replace(int argc, char **argv)
 	}
 
 	srcdev = argv[optind];
-	dstdev = argv[optind + 1];
+	dstdev = canonicalize_path(argv[optind + 1]);
+	if (!dstdev) {
+		fprintf(stderr,
+			"ERROR: Could not canonicalize path '%s': %s\n",
+			argv[optind + 1], strerror(errno));
+	}
 
 	if (is_numerical(srcdev)) {
 		struct btrfs_ioctl_fs_info_args fi_args;
 		struct btrfs_ioctl_dev_info_args *di_args = NULL;
 
-		if (atoi(srcdev) == 0) {
-			fprintf(stderr, "Error: Failed to parse the numerical devid value '%s'\n",
-				srcdev);
-			goto leave_with_error;
-		}
-		start_args.start.srcdevid = (__u64)atoi(srcdev);
+		start_args.start.srcdevid = arg_strtou64(srcdev);
 
 		ret = get_fs_info(path, &fi_args, &di_args);
 		if (ret) {
@@ -276,14 +281,15 @@ static int cmd_start_replace(int argc, char **argv)
 	}
 	strncpy((char *)start_args.start.tgtdev_name, dstdev,
 		BTRFS_DEVICE_PATH_NAME_MAX);
-	if (btrfs_prepare_device(fddstdev, dstdev, 1, &dstdev_block_count, 0,
-				 &mixed, 0)) {
-		fprintf(stderr, "Error: Failed to prepare device '%s'\n",
-			dstdev);
+	ret = btrfs_prepare_device(fddstdev, dstdev, 1, &dstdev_block_count, 0,
+				 &mixed, 0);
+	if (ret)
 		goto leave_with_error;
-	}
+
 	close(fddstdev);
 	fddstdev = -1;
+	free(dstdev);
+	dstdev = NULL;
 
 	dev_replace_handle_sigint(fdmnt);
 	if (!do_not_background) {
@@ -302,6 +308,11 @@ static int cmd_start_replace(int argc, char **argv)
 				"ERROR: ioctl(DEV_REPLACE_START) failed on \"%s\": %s, %s\n",
 				path, strerror(errno),
 				replace_dev_result2string(start_args.result));
+
+			if (errno == EOPNOTSUPP)
+				fprintf(stderr,
+					"WARNING: dev_replace does not yet handle RAID5/6\n");
+
 			goto leave_with_error;
 		}
 
@@ -318,6 +329,8 @@ static int cmd_start_replace(int argc, char **argv)
 	return 0;
 
 leave_with_error:
+	if (dstdev)
+		free(dstdev);
 	if (fdmnt != -1)
 		close(fdmnt);
 	if (fdsrcdev != -1)
@@ -450,7 +463,10 @@ static int print_replace_status(int fd, const char *path, int once)
 			break;
 		default:
 			prevent_loop = 1;
-			assert(0);
+			fprintf(stderr,
+				"Unknown btrfs dev replace status:%llu",
+				status->replace_state);
+			ret = -EINVAL;
 			break;
 		}
 
@@ -460,9 +476,9 @@ static int print_replace_status(int fd, const char *path, int once)
 				(unsigned long long)status->num_write_errors,
 				(unsigned long long)
 				 status->num_uncorrectable_read_errors);
-		if (once || prevent_loop) {
+		if (once || prevent_loop || ret) {
 			printf("\n");
-			return 0;
+			return ret;
 		}
 
 		fflush(stdout);

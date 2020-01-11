@@ -43,7 +43,6 @@
 #include <ext2fs/ext2_ext_attr.h>
 
 #define INO_OFFSET (BTRFS_FIRST_FREE_OBJECTID - EXT2_ROOT_INO)
-#define STRIPE_LEN (64 * 1024)
 #define EXT2_IMAGE_SUBVOL_OBJECTID BTRFS_FIRST_FREE_OBJECTID
 
 /*
@@ -134,11 +133,11 @@ static int cache_free_extents(struct btrfs_root *root, ext2_filsys ext2_fs)
 
 	for (i = 0; i < BTRFS_SUPER_MIRROR_MAX; i++) {
 		bytenr = btrfs_sb_offset(i);
-		bytenr &= ~((u64)STRIPE_LEN - 1);
+		bytenr &= ~((u64)BTRFS_STRIPE_LEN - 1);
 		if (bytenr >= blocksize * ext2_fs->super->s_blocks_count)
 			break;
 		clear_extent_dirty(&root->fs_info->free_space_cache, bytenr,
-				   bytenr + STRIPE_LEN - 1, 0);
+				   bytenr + BTRFS_STRIPE_LEN - 1, 0);
 	}
 
 	clear_extent_dirty(&root->fs_info->free_space_cache,
@@ -207,9 +206,9 @@ static int intersect_with_sb(u64 bytenr, u64 num_bytes)
 
 	for (i = 0; i < BTRFS_SUPER_MIRROR_MAX; i++) {
 		offset = btrfs_sb_offset(i);
-		offset &= ~((u64)STRIPE_LEN - 1);
+		offset &= ~((u64)BTRFS_STRIPE_LEN - 1);
 
-		if (bytenr < offset + STRIPE_LEN &&
+		if (bytenr < offset + BTRFS_STRIPE_LEN &&
 		    bytenr + num_bytes > offset)
 			return 1;
 	}
@@ -450,8 +449,8 @@ static int block_iterate_proc(ext2_filsys ext2_fs,
 		}
 
 		if (sb_region) {
-			bytenr += STRIPE_LEN - 1;
-			bytenr &= ~((u64)STRIPE_LEN - 1);
+			bytenr += BTRFS_STRIPE_LEN - 1;
+			bytenr &= ~((u64)BTRFS_STRIPE_LEN - 1);
 		} else {
 			cache = btrfs_lookup_block_group(root->fs_info, bytenr);
 			BUG_ON(!cache);
@@ -547,8 +546,7 @@ static int create_file_extents(struct btrfs_trans_handle *trans,
 					 data.first_block, data.checksum);
 	}
 fail:
-	if (buffer)
-		free(buffer);
+	free(buffer);
 	return ret;
 error:
 	fprintf(stderr, "ext2fs_block_iterate2: %s\n", error_message(err));
@@ -785,8 +783,7 @@ static int copy_single_xattr(struct btrfs_trans_handle *trans,
 	ret = btrfs_insert_xattr_item(trans, root, namebuf, name_len,
 				      data, datalen, objectid);
 out:
-	if (databuf)
-		free(databuf);
+	free(databuf);
 	return ret;
 }
 
@@ -892,8 +889,7 @@ static int copy_extended_attrs(struct btrfs_trans_handle *trans,
 		entry = EXT2_EXT_ATTR_NEXT(entry);
 	}
 out:
-	if (buffer != NULL)
-		free(buffer);
+	free(buffer);
 	if ((void *)ext2_inode != inode_buf)
 		free(ext2_inode);
 	return ret;
@@ -1523,7 +1519,7 @@ static int create_chunk_mapping(struct btrfs_trans_handle *trans,
 		btrfs_set_stack_chunk_length(&chunk, cache->key.offset);
 		btrfs_set_stack_chunk_owner(&chunk,
 					    extent_root->root_key.objectid);
-		btrfs_set_stack_chunk_stripe_len(&chunk, STRIPE_LEN);
+		btrfs_set_stack_chunk_stripe_len(&chunk, BTRFS_STRIPE_LEN);
 		btrfs_set_stack_chunk_type(&chunk, cache->flags);
 		btrfs_set_stack_chunk_io_align(&chunk, device->io_align);
 		btrfs_set_stack_chunk_io_width(&chunk, device->io_width);
@@ -1634,6 +1630,7 @@ static int init_btrfs(struct btrfs_root *root)
 	ret = create_subvol(trans, root, BTRFS_DATA_RELOC_TREE_OBJECTID);
 	BUG_ON(ret);
 
+	extent_buffer_get(fs_info->csum_root->node);
 	ret = __btrfs_cow_block(trans, fs_info->csum_root,
 				fs_info->csum_root->node, NULL, 0, &tmp, 0, 0);
 	BUG_ON(ret);
@@ -1646,7 +1643,7 @@ err:
 }
 
 /*
- * Migrate super block to it's default position and zero 0 ~ 16k
+ * Migrate super block to its default position and zero 0 ~ 16k
  */
 static int migrate_super_block(int fd, u64 old_bytenr, u32 sectorsize)
 {
@@ -1716,7 +1713,7 @@ static int prepare_system_chunk_sb(struct btrfs_super_block *super)
 
 	btrfs_set_stack_chunk_length(chunk, btrfs_super_total_bytes(super));
 	btrfs_set_stack_chunk_owner(chunk, BTRFS_EXTENT_TREE_OBJECTID);
-	btrfs_set_stack_chunk_stripe_len(chunk, 64 * 1024);
+	btrfs_set_stack_chunk_stripe_len(chunk, BTRFS_STRIPE_LEN);
 	btrfs_set_stack_chunk_type(chunk, BTRFS_BLOCK_GROUP_SYSTEM);
 	btrfs_set_stack_chunk_io_align(chunk, sectorsize);
 	btrfs_set_stack_chunk_io_width(chunk, sectorsize);
@@ -2098,10 +2095,10 @@ static int cleanup_sys_chunk(struct btrfs_root *fs_root,
 	}
 	for (i = 0; i < BTRFS_SUPER_MIRROR_MAX; i++) {
 		offset = btrfs_sb_offset(i);
-		offset &= ~((u64)STRIPE_LEN - 1);
+		offset &= ~((u64)BTRFS_STRIPE_LEN - 1);
 
 		ret = relocate_extents_range(fs_root, ext2_root,
-					     offset, offset + STRIPE_LEN);
+					     offset, offset + BTRFS_STRIPE_LEN);
 		if (ret)
 			goto fail;
 	}
@@ -2243,7 +2240,7 @@ static int do_convert(const char *devname, int datacsum, int packing,
 		goto fail;
 	}
 	ret = make_btrfs(fd, devname, ext2_fs->super->s_volume_name,
-			 blocks, total_bytes, blocksize, blocksize,
+			 NULL, blocks, total_bytes, blocksize, blocksize,
 			 blocksize, blocksize, 0);
 	if (ret) {
 		fprintf(stderr, "unable to create initial ctree: %s\n",
@@ -2379,7 +2376,7 @@ fail:
 	return -1;
 }
 
-static int do_rollback(const char *devname, int force)
+static int do_rollback(const char *devname)
 {
 	int fd = -1;
 	int ret;
@@ -2444,7 +2441,7 @@ static int do_rollback(const char *devname, int force)
 	ext2_root = btrfs_read_fs_root(root->fs_info, &key);
 	if (!ext2_root || IS_ERR(ext2_root)) {
 		fprintf(stderr, "unable to open subvol %llu\n",
-			key.objectid);
+			(unsigned long long)key.objectid);
 		goto fail;
 	}
 
@@ -2702,6 +2699,7 @@ int main(int argc, char *argv[])
 	int noxattr = 0;
 	int datacsum = 1;
 	int rollback = 0;
+	int usage_error = 0;
 	char *file;
 	while(1) {
 		int c = getopt(argc, argv, "dinr");
@@ -2726,19 +2724,36 @@ int main(int argc, char *argv[])
 		}
 	}
 	argc = argc - optind;
-	if (argc != 1) {
+	set_argv0(argv);
+	if (check_argc_exact(argc, 1)) {
+		print_usage();
+		return 1;
+	}
+
+	if (rollback && (!datacsum || noxattr || !packing)) {
+		fprintf(stderr,
+			"Usage error: -d, -i, -n options do not apply to rollback\n");
+		usage_error++;
+	}
+
+	if (usage_error) {
 		print_usage();
 		return 1;
 	}
 
 	file = argv[optind];
-	if (check_mounted(file)) {
+	ret = check_mounted(file);
+	if (ret < 0) {
+		fprintf(stderr, "Could not check mount status: %s\n",
+			strerror(-ret));
+		return 1;
+	} else if (ret) {
 		fprintf(stderr, "%s is mounted\n", file);
 		return 1;
 	}
 
 	if (rollback) {
-		ret = do_rollback(file, 0);
+		ret = do_rollback(file);
 	} else {
 		ret = do_convert(file, datacsum, packing, noxattr);
 	}

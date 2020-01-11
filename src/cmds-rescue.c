@@ -74,15 +74,19 @@ int cmd_chunk_recover(int argc, char *argv[])
 	}
 
 	argc = argc - optind;
-	if (argc == 0)
+	if (check_argc_exact(argc, 1))
 		usage(cmd_chunk_recover_usage);
 
 	file = argv[optind];
 
 	ret = check_mounted(file);
-	if (ret) {
+	if (ret < 0) {
+		fprintf(stderr, "Could not check mount status: %s\n",
+			strerror(-ret));
+		return 1;
+	} else if (ret) {
 		fprintf(stderr, "the device is busy\n");
-		return ret;
+		return 1;
 	}
 
 	ret = btrfs_recover_chunk_tree(file, verbose, yes);
@@ -128,12 +132,16 @@ int cmd_super_recover(int argc, char **argv)
 		}
 	}
 	argc = argc - optind;
-	if (argc != 1)
+	if (check_argc_exact(argc, 1))
 		usage(cmd_super_recover_usage);
 
 	dname = argv[optind];
 	ret = check_mounted(dname);
-	if (ret) {
+	if (ret < 0) {
+		fprintf(stderr, "Could not check mount status: %s\n",
+			strerror(-ret));
+		return 1;
+	} else if (ret) {
 		fprintf(stderr, "the device is busy\n");
 		return 1;
 	}

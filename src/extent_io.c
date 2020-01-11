@@ -552,7 +552,7 @@ static int free_some_buffers(struct extent_io_tree *tree)
 
 	list_for_each_safe(node, next, &tree->lru) {
 		eb = list_entry(node, struct extent_buffer, lru);
-		if (eb->refs == 1) {
+		if (eb->refs == 1 && !(eb->flags & EXTENT_DIRTY)) {
 			free_extent_buffer(eb);
 			if (tree->cache_size < cache_hard_max)
 				break;
@@ -580,7 +580,7 @@ static struct extent_buffer *__alloc_extent_buffer(struct extent_io_tree *tree,
 
 	eb->start = bytenr;
 	eb->len = blocksize;
-	eb->refs = 2;
+	eb->refs = 1;
 	eb->flags = 0;
 	eb->tree = tree;
 	eb->fd = -1;

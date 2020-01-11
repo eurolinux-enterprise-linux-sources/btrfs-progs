@@ -41,25 +41,6 @@ static const char * const subvolume_cmd_group_usage[] = {
 	NULL
 };
 
-/*
- * test if path is a directory
- * this function return
- * 0-> path exists but it is not a directory
- * 1-> path exists and it is  a directory
- * -1 -> path is unaccessible
- */
-static int test_isdir(char *path)
-{
-	struct stat	st;
-	int		res;
-
-	res = stat(path, &st);
-	if(res < 0 )
-		return -1;
-
-	return S_ISDIR(st.st_mode);
-}
-
 static const char * const cmd_subvol_create_usage[] = {
 	"btrfs subvolume create [-i <qgroupid>] [<dest>/]<name>",
 	"Create a subvolume",
@@ -126,23 +107,22 @@ static int cmd_subvol_create(int argc, char **argv)
 	dupdir = strdup(dst);
 	dstdir = dirname(dupdir);
 
-	if (!strcmp(newname, ".") || !strcmp(newname, "..") ||
-	     strchr(newname, '/') ){
-		fprintf(stderr, "ERROR: uncorrect subvolume name ('%s')\n",
+	if (!test_issubvolname(newname)) {
+		fprintf(stderr, "ERROR: incorrect subvolume name '%s'\n",
 			newname);
 		goto out;
 	}
 
 	len = strlen(newname);
 	if (len == 0 || len >= BTRFS_VOL_NAME_MAX) {
-		fprintf(stderr, "ERROR: subvolume name too long ('%s)\n",
+		fprintf(stderr, "ERROR: subvolume name too long '%s'\n",
 			newname);
 		goto out;
 	}
 
 	fddst = open_file_or_dir(dstdir, &dirstream);
 	if (fddst < 0) {
-		fprintf(stderr, "ERROR: can't access to '%s'\n", dstdir);
+		fprintf(stderr, "ERROR: can't access '%s'\n", dstdir);
 		goto out;
 	}
 
@@ -201,24 +181,77 @@ int test_issubvolume(char *path)
 	return (st.st_ino == 256) && S_ISDIR(st.st_mode);
 }
 
+static int wait_for_commit(int fd)
+{
+	int ret;
+
+	ret = ioctl(fd, BTRFS_IOC_START_SYNC, NULL);
+	if (ret < 0)
+		return ret;
+	return ioctl(fd, BTRFS_IOC_WAIT_SYNC, NULL);
+}
+
 static const char * const cmd_subvol_delete_usage[] = {
-	"btrfs subvolume delete <subvolume> [<subvolume>...]",
+	"btrfs subvolume delete [options] <subvolume> [<subvolume>...]",
 	"Delete subvolume(s)",
+	"Delete subvolumes from the filesystem. The corresponding directory",
+	"is removed instantly but the data blocks are removed later.",
+	"The deletion does not involve full commit by default due to",
+	"performance reasons (as a consequence, the subvolume may appear again",
+	"after a crash). Use one of the --commit options to wait until the",
+	"operation is safely stored on the media.",
+	"",
+	"-c|--commit-after      wait for transaction commit at the end of the operation",
+	"-C|--commit-each       wait for transaction commit after deleting each subvolume",
 	NULL
 };
 
 static int cmd_subvol_delete(int argc, char **argv)
 {
-	int	res, fd, len, e, cnt = 1, ret = 0;
+	int	res, len, e, ret = 0;
+	int cnt;
+	int fd = -1;
 	struct btrfs_ioctl_vol_args	args;
 	char	*dname, *vname, *cpath;
 	char	*dupdname = NULL;
 	char	*dupvname = NULL;
 	char	*path;
 	DIR	*dirstream = NULL;
+	int sync_mode = 0;
+	struct option long_options[] = {
+		{"commit-after", no_argument, NULL, 'c'},  /* sync mode 1 */
+		{"commit-each", no_argument, NULL, 'C'},  /* sync mode 2 */
+		{NULL, 0, NULL, 0}
+	};
 
-	if (argc < 2)
+	optind = 1;
+	while (1) {
+		int c;
+
+		c = getopt_long(argc, argv, "cC", long_options, NULL);
+		if (c < 0)
+			break;
+
+		switch(c) {
+		case 'c':
+			sync_mode = 1;
+			break;
+		case 'C':
+			sync_mode = 2;
+			break;
+		default:
+			usage(cmd_subvol_delete_usage);
+		}
+	}
+
+	if (check_argc_min(argc - optind, 1))
 		usage(cmd_subvol_delete_usage);
+
+	printf("Transaction commit: %s\n",
+		!sync_mode ? "none (default)" :
+		sync_mode == 1 ? "at the end" : "after each");
+
+	cnt = optind;
 
 again:
 	path = argv[cnt];
@@ -248,9 +281,8 @@ again:
 	vname = basename(dupvname);
 	free(cpath);
 
-	if (!strcmp(vname, ".") || !strcmp(vname, "..") ||
-	     strchr(vname, '/')) {
-		fprintf(stderr, "ERROR: incorrect subvolume name ('%s')\n",
+	if (!test_issubvolname(vname)) {
+		fprintf(stderr, "ERROR: incorrect subvolume name '%s'\n",
 			vname);
 		ret = 1;
 		goto out;
@@ -258,7 +290,7 @@ again:
 
 	len = strlen(vname);
 	if (len == 0 || len >= BTRFS_VOL_NAME_MAX) {
-		fprintf(stderr, "ERROR: snapshot name too long ('%s)\n",
+		fprintf(stderr, "ERROR: snapshot name too long '%s'\n",
 			vname);
 		ret = 1;
 		goto out;
@@ -266,7 +298,7 @@ again:
 
 	fd = open_file_or_dir(dname, &dirstream);
 	if (fd < 0) {
-		fprintf(stderr, "ERROR: can't access to '%s'\n", dname);
+		fprintf(stderr, "ERROR: can't access '%s'\n", dname);
 		ret = 1;
 		goto out;
 	}
@@ -276,13 +308,21 @@ again:
 	res = ioctl(fd, BTRFS_IOC_SNAP_DESTROY, &args);
 	e = errno;
 
-	close_file_or_dir(fd, dirstream);
-
 	if(res < 0 ){
 		fprintf( stderr, "ERROR: cannot delete '%s/%s' - %s\n",
 			dname, vname, strerror(e));
 		ret = 1;
 		goto out;
+	}
+
+	if (sync_mode == 1) {
+		res = wait_for_commit(fd);
+		if (res < 0) {
+			fprintf(stderr,
+				"ERROR: unable to wait for commit after '%s': %s\n",
+				path, strerror(errno));
+			ret = 1;
+		}
 	}
 
 out:
@@ -291,8 +331,24 @@ out:
 	dupdname = NULL;
 	dupvname = NULL;
 	cnt++;
-	if (cnt < argc)
+	if (cnt < argc) {
+		close_file_or_dir(fd, dirstream);
+		/* avoid double free */
+		fd = -1;
+		dirstream = NULL;
 		goto again;
+	}
+
+	if (sync_mode == 2 && fd != -1) {
+		res = wait_for_commit(fd);
+		if (res < 0) {
+			fprintf(stderr,
+				"ERROR: unable to do final sync: %s\n",
+				strerror(errno));
+			ret = 1;
+		}
+	}
+	close_file_or_dir(fd, dirstream);
 
 	return ret;
 }
@@ -313,9 +369,10 @@ static const char * const cmd_subvol_list_usage[] = {
 	"             to the given <path>",
 	"-c           print the ogeneration of the subvolume",
 	"-g           print the generation of the subvolume",
-	"-o           print only subvolumes bellow specified path",
+	"-o           print only subvolumes below specified path",
 	"-u           print the uuid of subvolumes (and snapshots)",
 	"-q           print the parent uuid of the snapshots",
+	"-R           print the uuid of the received snapshots",
 	"-t           print the result as a table",
 	"-s           list snapshots only in the filesystem",
 	"-r           list readonly subvolumes (including snapshots)",
@@ -358,7 +415,7 @@ static int cmd_subvol_list(int argc, char **argv)
 	optind = 1;
 	while(1) {
 		c = getopt_long(argc, argv,
-				    "acdgopqsurG:C:t", long_options, NULL);
+				    "acdgopqsurRG:C:t", long_options, NULL);
 		if (c < 0)
 			break;
 
@@ -398,6 +455,9 @@ static int cmd_subvol_list(int argc, char **argv)
 			break;
 		case 'q':
 			btrfs_list_setup_print_column(BTRFS_LIST_PUUID);
+			break;
+		case 'R':
+			btrfs_list_setup_print_column(BTRFS_LIST_RUUID);
 			break;
 		case 'r':
 			flags |= BTRFS_ROOT_SUBVOL_RDONLY;
@@ -595,29 +655,28 @@ static int cmd_snapshot(int argc, char **argv)
 		dstdir = dirname(dupdir);
 	}
 
-	if (!strcmp(newname, ".") || !strcmp(newname, "..") ||
-	     strchr(newname, '/') ){
-		fprintf(stderr, "ERROR: incorrect snapshot name ('%s')\n",
+	if (!test_issubvolname(newname)) {
+		fprintf(stderr, "ERROR: incorrect snapshot name '%s'\n",
 			newname);
 		goto out;
 	}
 
 	len = strlen(newname);
 	if (len == 0 || len >= BTRFS_VOL_NAME_MAX) {
-		fprintf(stderr, "ERROR: snapshot name too long ('%s)\n",
+		fprintf(stderr, "ERROR: snapshot name too long '%s'\n",
 			newname);
 		goto out;
 	}
 
 	fddst = open_file_or_dir(dstdir, &dirstream1);
 	if (fddst < 0) {
-		fprintf(stderr, "ERROR: can't access to '%s'\n", dstdir);
+		fprintf(stderr, "ERROR: can't access '%s'\n", dstdir);
 		goto out;
 	}
 
 	fd = open_file_or_dir(subvol, &dirstream2);
 	if (fd < 0) {
-		fprintf(stderr, "ERROR: can't access to '%s'\n", dstdir);
+		fprintf(stderr, "ERROR: can't access '%s'\n", dstdir);
 		goto out;
 	}
 
@@ -743,15 +802,11 @@ static int cmd_subvol_set_default(int argc, char **argv)
 	subvolid = argv[1];
 	path = argv[2];
 
-	objectid = (unsigned long long)strtoll(subvolid, NULL, 0);
-	if (errno == ERANGE) {
-		fprintf(stderr, "ERROR: invalid tree id (%s)\n", subvolid);
-		return 1;
-	}
+	objectid = arg_strtou64(subvolid);
 
 	fd = open_file_or_dir(path, &dirstream);
 	if (fd < 0) {
-		fprintf(stderr, "ERROR: can't access to '%s'\n", path);
+		fprintf(stderr, "ERROR: can't access '%s'\n", path);
 		return 1;
 	}
 
@@ -784,7 +839,7 @@ static int cmd_find_new(int argc, char **argv)
 		usage(cmd_find_new_usage);
 
 	subvol = argv[1];
-	last_gen = atoll(argv[2]);
+	last_gen = arg_strtou64(argv[2]);
 
 	ret = test_issubvolume(subvol);
 	if (ret < 0) {
@@ -826,7 +881,7 @@ static int cmd_subvol_show(int argc, char **argv)
 	struct root_info get_ri;
 	struct btrfs_list_filter_set *filter_set;
 	char tstr[256];
-	char uuidparse[37];
+	char uuidparse[BTRFS_UUID_UNPARSED_SIZE];
 	char *fullpath = NULL, *svpath = NULL, *mnt = NULL;
 	char raw_prefix[] = "\t\t\t\t";
 	u64 sv_id, mntid;
@@ -856,8 +911,15 @@ static int cmd_subvol_show(int argc, char **argv)
 
 	ret = find_mount_root(fullpath, &mnt);
 	if (ret < 0) {
-		fprintf(stderr, "ERROR: find_mount_root failed on %s: "
+		fprintf(stderr, "ERROR: find_mount_root failed on '%s': "
 				"%s\n", fullpath, strerror(-ret));
+		goto out;
+	}
+	if (ret > 0) {
+		fprintf(stderr,
+			"ERROR: %s doesn't belong to btrfs mount point\n",
+			fullpath);
+		ret = -EINVAL;
 		goto out;
 	}
 	ret = 1;
@@ -949,22 +1011,16 @@ static int cmd_subvol_show(int argc, char **argv)
 			1, raw_prefix);
 
 	/* clean up */
-	if (get_ri.path)
-		free(get_ri.path);
-	if (get_ri.name)
-		free(get_ri.name);
-	if (get_ri.full_path)
-		free(get_ri.full_path);
-	if (filter_set)
-		btrfs_list_free_filter_set(filter_set);
+	free(get_ri.path);
+	free(get_ri.name);
+	free(get_ri.full_path);
+	btrfs_list_free_filter_set(filter_set);
 
 out:
 	close_file_or_dir(fd, dirstream1);
 	close_file_or_dir(mntfd, dirstream2);
-	if (mnt)
-		free(mnt);
-	if (fullpath)
-		free(fullpath);
+	free(mnt);
+	free(fullpath);
 	return !!ret;
 }
 

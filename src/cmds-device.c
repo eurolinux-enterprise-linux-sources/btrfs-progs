@@ -85,7 +85,7 @@ static int cmd_add_dev(int argc, char **argv)
 
 	fdmnt = open_file_or_dir(mntpnt, &dirstream);
 	if (fdmnt < 0) {
-		fprintf(stderr, "ERROR: can't access to '%s'\n", mntpnt);
+		fprintf(stderr, "ERROR: can't access '%s'\n", mntpnt);
 		return 1;
 	}
 
@@ -94,6 +94,7 @@ static int cmd_add_dev(int argc, char **argv)
 		int	devfd, res;
 		u64 dev_block_count = 0;
 		int mixed = 0;
+		char *path;
 
 		res = test_dev_for_mkfs(argv[i], force, estr);
 		if (res) {
@@ -111,25 +112,33 @@ static int cmd_add_dev(int argc, char **argv)
 
 		res = btrfs_prepare_device(devfd, argv[i], 1, &dev_block_count,
 					   0, &mixed, discard);
-		if (res) {
-			fprintf(stderr, "ERROR: Unable to init '%s'\n", argv[i]);
-			close(devfd);
-			ret++;
-			continue;
-		}
 		close(devfd);
+		if (res) {
+			ret++;
+			goto error_out;
+		}
 
-		strncpy_null(ioctl_args.name, argv[i]);
+		path = canonicalize_path(argv[i]);
+		if (!path) {
+			fprintf(stderr,
+				"ERROR: Could not canonicalize pathname '%s': %s\n",
+				argv[i], strerror(errno));
+			ret++;
+			goto error_out;
+		}
+
+		strncpy_null(ioctl_args.name, path);
 		res = ioctl(fdmnt, BTRFS_IOC_ADD_DEV, &ioctl_args);
 		e = errno;
-		if(res<0){
+		if (res < 0) {
 			fprintf(stderr, "ERROR: error adding the device '%s' - %s\n",
-				argv[i], strerror(e));
+				path, strerror(e));
 			ret++;
 		}
-
+		free(path);
 	}
 
+error_out:
 	close_file_or_dir(fdmnt, dirstream);
 	return !!ret;
 }
@@ -153,7 +162,7 @@ static int cmd_rm_dev(int argc, char **argv)
 
 	fdmnt = open_file_or_dir(mntpnt, &dirstream);
 	if (fdmnt < 0) {
-		fprintf(stderr, "ERROR: can't access to '%s'\n", mntpnt);
+		fprintf(stderr, "ERROR: can't access '%s'\n", mntpnt);
 		return 1;
 	}
 
@@ -161,6 +170,12 @@ static int cmd_rm_dev(int argc, char **argv)
 		struct	btrfs_ioctl_vol_args arg;
 		int	res;
 
+		if (!is_block_device(argv[i])) {
+			fprintf(stderr,
+				"ERROR: %s is not a block device\n", argv[i]);
+			ret++;
+			continue;
+		}
 		strncpy_null(arg.name, argv[i]);
 		res = ioctl(fdmnt, BTRFS_IOC_RM_DEV, &arg);
 		e = errno;
@@ -182,49 +197,79 @@ static int cmd_rm_dev(int argc, char **argv)
 }
 
 static const char * const cmd_scan_dev_usage[] = {
-	"btrfs device scan [<--all-devices>|<device> [<device>...]]",
+	"btrfs device scan [(-d|--all-devices)|<device> [<device>...]]",
 	"Scan devices for a btrfs filesystem",
 	NULL
 };
 
 static int cmd_scan_dev(int argc, char **argv)
 {
-	int	i, fd, e;
-	int	where = BTRFS_SCAN_LBLKID;
-	int	devstart = 1;
+	int i, fd, e;
+	int where = BTRFS_SCAN_LBLKID;
+	int devstart = 1;
+	int all = 0;
+	int ret = 0;
 
-	if( argc > 1 && !strcmp(argv[1],"--all-devices")){
-		if (check_argc_max(argc, 2))
+	optind = 1;
+	while (1) {
+		int long_index;
+		static struct option long_options[] = {
+			{ "all-devices", no_argument, NULL, 'd'},
+			{ 0, 0, 0, 0 },
+		};
+		int c = getopt_long(argc, argv, "d", long_options,
+				    &long_index);
+		if (c < 0)
+			break;
+		switch (c) {
+		case 'd':
+			where = BTRFS_SCAN_DEV;
+			all = 1;
+			break;
+		default:
 			usage(cmd_scan_dev_usage);
-
-		where = BTRFS_SCAN_DEV;
-		devstart += 1;
+		}
 	}
 
-	if(argc<=devstart){
-		int ret;
+	if (all && check_argc_max(argc, 2))
+		usage(cmd_scan_dev_usage);
+
+	if (all || argc == 1) {
 		printf("Scanning for Btrfs filesystems\n");
 		ret = scan_for_btrfs(where, BTRFS_UPDATE_KERNEL);
-		if (ret){
+		if (ret)
 			fprintf(stderr, "ERROR: error %d while scanning\n", ret);
-			return 1;
-		}
-		return 0;
+		goto out;
 	}
 
 	fd = open("/dev/btrfs-control", O_RDWR);
 	if (fd < 0) {
 		perror("failed to open /dev/btrfs-control");
-		return 1;
+		ret = 1;
+		goto out;
 	}
 
 	for( i = devstart ; i < argc ; i++ ){
 		struct btrfs_ioctl_vol_args args;
-		int ret;
+		char *path;
 
-		printf("Scanning for Btrfs filesystems in '%s'\n", argv[i]);
+		if (!is_block_device(argv[i])) {
+			fprintf(stderr,
+				"ERROR: %s is not a block device\n", argv[i]);
+			ret = 1;
+			goto close_out;
+		}
+		path = canonicalize_path(argv[i]);
+		if (!path) {
+			fprintf(stderr,
+				"ERROR: Could not canonicalize path '%s': %s\n",
+				argv[i], strerror(errno));
+			ret = 1;
+			goto close_out;
+		}
+		printf("Scanning for Btrfs filesystems in '%s'\n", path);
 
-		strncpy_null(args.name, argv[i]);
+		strncpy_null(args.name, path);
 		/*
 		 * FIXME: which are the error code returned by this ioctl ?
 		 * it seems that is impossible to understand if there no is
@@ -234,20 +279,23 @@ static int cmd_scan_dev(int argc, char **argv)
 		e = errno;
 
 		if( ret < 0 ){
-			close(fd);
 			fprintf(stderr, "ERROR: unable to scan the device '%s' - %s\n",
-				argv[i], strerror(e));
-			return 1;
+				path, strerror(e));
+			free(path);
+			goto close_out;
 		}
+		free(path);
 	}
 
+close_out:
 	close(fd);
-	return 0;
+out:
+	return !!ret;
 }
 
 static const char * const cmd_ready_dev_usage[] = {
 	"btrfs device ready <device>",
-	"Check device to see if it has all of it's devices in cache for mounting",
+	"Check device to see if it has all of its devices in cache for mounting",
 	NULL
 };
 
@@ -256,6 +304,7 @@ static int cmd_ready_dev(int argc, char **argv)
 	struct	btrfs_ioctl_vol_args args;
 	int	fd;
 	int	ret;
+	char	*path;
 
 	if (check_argc_min(argc, 2))
 		usage(cmd_ready_dev_usage);
@@ -266,15 +315,33 @@ static int cmd_ready_dev(int argc, char **argv)
 		return 1;
 	}
 
-	strncpy(args.name, argv[argc - 1], BTRFS_PATH_NAME_MAX);
+	path = canonicalize_path(argv[argc - 1]);
+	if (!path) {
+		fprintf(stderr,
+			"ERROR: Could not canonicalize pathname '%s': %s\n",
+			argv[argc - 1], strerror(errno));
+		ret = 1;
+		goto out;
+	}
+
+	if (!is_block_device(path)) {
+		fprintf(stderr,
+			"ERROR: %s is not a block device\n", path);
+		ret = 1;
+		goto out;
+	}
+
+	strncpy(args.name, path, BTRFS_PATH_NAME_MAX);
 	ret = ioctl(fd, BTRFS_IOC_DEVICES_READY, &args);
 	if (ret < 0) {
 		fprintf(stderr, "ERROR: unable to determine if the device '%s'"
-			" is ready for mounting - %s\n", argv[argc - 1],
+			" is ready for mounting - %s\n", path,
 			strerror(errno));
 		ret = 1;
 	}
 
+out:
+	free(path);
 	close(fd);
 	return ret;
 }
@@ -306,25 +373,26 @@ static int cmd_dev_stats(int argc, char **argv)
 			break;
 		case '?':
 		default:
-			fprintf(stderr, "ERROR: device stat args invalid.\n"
-					" device stat [-z] <path>|<device>\n"
-					" -z  to reset stats after reading.\n");
-			return 1;
+			usage(cmd_dev_stats_usage);
 		}
 	}
 
-	if (optind + 1 != argc) {
-		fprintf(stderr, "ERROR: device stat needs path|device as single"
-			" argument\n");
-		return 1;
-	}
+	argc = argc - optind;
+	if (check_argc_exact(argc, 1))
+		usage(cmd_dev_stats_usage);
 
 	dev_path = argv[optind];
 
 	fdmnt = open_path_or_dev_mnt(dev_path, &dirstream);
 
 	if (fdmnt < 0) {
-		fprintf(stderr, "ERROR: can't access '%s'\n", dev_path);
+		if (errno == EINVAL)
+			fprintf(stderr,
+				"ERROR: '%s' is not a mounted btrfs device\n",
+				dev_path);
+		else
+			fprintf(stderr, "ERROR: can't access '%s': %s\n",
+				dev_path, strerror(errno));
 		return 1;
 	}
 

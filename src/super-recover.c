@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2013 Fujitsu.  All rights reserved.
+ * Copyright (C) 2013 FUJITSU LIMITED.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
@@ -292,7 +292,7 @@ int btrfs_recover_superblocks(const char *dname,
 	}
 	init_recover_superblock(&recover);
 
-	ret = btrfs_scan_fs_devices(fd, dname, &recover.fs_devices, 0, 0);
+	ret = btrfs_scan_fs_devices(fd, dname, &recover.fs_devices, 0, 0, 1);
 	close(fd);
 	if (ret) {
 		ret = 1;

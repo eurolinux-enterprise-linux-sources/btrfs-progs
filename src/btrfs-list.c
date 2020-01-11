@@ -85,6 +85,11 @@ static struct {
 		.need_print	= 0,
 	},
 	{
+		.name		= "received_uuid",
+		.column_name	= "Received UUID",
+		.need_print	= 0,
+	},
+	{
 		.name		= "uuid",
 		.column_name	= "UUID",
 		.need_print	= 0,
@@ -391,7 +396,7 @@ static struct root_info *root_tree_search(struct root_lookup *root_tree,
 static int update_root(struct root_lookup *root_lookup,
 		       u64 root_id, u64 ref_tree, u64 root_offset, u64 flags,
 		       u64 dir_id, char *name, int name_len, u64 ogen, u64 gen,
-		       time_t ot, void *uuid, void *puuid)
+		       time_t ot, void *uuid, void *puuid, void *ruuid)
 {
 	struct root_info *ri;
 
@@ -399,8 +404,7 @@ static int update_root(struct root_lookup *root_lookup,
 	if (!ri || ri->root_id != root_id)
 		return -ENOENT;
 	if (name && name_len > 0) {
-		if (ri->name)
-			free(ri->name);
+		free(ri->name);
 
 		ri->name = malloc(name_len + 1);
 		if (!ri->name) {
@@ -430,6 +434,8 @@ static int update_root(struct root_lookup *root_lookup,
 		memcpy(&ri->uuid, uuid, BTRFS_UUID_SIZE);
 	if (puuid)
 		memcpy(&ri->puuid, puuid, BTRFS_UUID_SIZE);
+	if (ruuid)
+		memcpy(&ri->ruuid, ruuid, BTRFS_UUID_SIZE);
 
 	return 0;
 }
@@ -448,17 +454,19 @@ static int update_root(struct root_lookup *root_lookup,
  * ot: the original time(create time) of the root
  * uuid: uuid of the root
  * puuid: uuid of the root parent if any
+ * ruuid: uuid of the received subvol, if any
  */
 static int add_root(struct root_lookup *root_lookup,
 		    u64 root_id, u64 ref_tree, u64 root_offset, u64 flags,
 		    u64 dir_id, char *name, int name_len, u64 ogen, u64 gen,
-		    time_t ot, void *uuid, void *puuid)
+		    time_t ot, void *uuid, void *puuid, void *ruuid)
 {
 	struct root_info *ri;
 	int ret;
 
 	ret = update_root(root_lookup, root_id, ref_tree, root_offset, flags,
-			  dir_id, name, name_len, ogen, gen, ot, uuid, puuid);
+			  dir_id, name, name_len, ogen, gen, ot,
+			  uuid, puuid, ruuid);
 	if (!ret)
 		return 0;
 
@@ -502,6 +510,9 @@ static int add_root(struct root_lookup *root_lookup,
 	if (puuid)
 		memcpy(&ri->puuid, puuid, BTRFS_UUID_SIZE);
 
+	if (ruuid)
+		memcpy(&ri->ruuid, ruuid, BTRFS_UUID_SIZE);
+
 	ret = root_tree_insert(root_lookup, ri);
 	if (ret) {
 		printf("failed to insert tree %llu\n", (unsigned long long)root_id);
@@ -515,15 +526,9 @@ static void __free_root_info(struct rb_node *node)
 	struct root_info *ri;
 
 	ri = rb_entry(node, struct root_info, rb_node);
-	if (ri->name)
-		free(ri->name);
-
-	if (ri->path)
-		free(ri->path);
-
-	if (ri->full_path)
-		free(ri->full_path);
-
+	free(ri->name);
+	free(ri->path);
+	free(ri->full_path);
 	free(ri);
 }
 
@@ -585,23 +590,18 @@ static int resolve_root(struct root_lookup *rl, struct root_info *ri,
 			full_path = strdup(found->path);
 			len = add_len;
 		}
+		if (!ri->top_id)
+			ri->top_id = found->ref_tree;
 
 		next = found->ref_tree;
-
-		if (next == top_id) {
-			ri->top_id = top_id;
+		if (next == top_id)
 			break;
-		}
-
 		/*
 		* if the ref_tree = BTRFS_FS_TREE_OBJECTID,
 		* we are at the top
 		*/
-		if (next == BTRFS_FS_TREE_OBJECTID) {
-			ri->top_id = next;
+		if (next == BTRFS_FS_TREE_OBJECTID)
 			break;
-		}
-
 		/*
 		* if the ref_tree wasn't in our tree of roots, the
 		* subvolume was deleted.
@@ -990,6 +990,7 @@ static int __list_subvol_search(int fd, struct root_lookup *root_lookup)
 	time_t t;
 	u8 uuid[BTRFS_UUID_SIZE];
 	u8 puuid[BTRFS_UUID_SIZE];
+	u8 ruuid[BTRFS_UUID_SIZE];
 
 	root_lookup_init(root_lookup);
 	memset(&args, 0, sizeof(args));
@@ -1042,7 +1043,7 @@ static int __list_subvol_search(int fd, struct root_lookup *root_lookup)
 
 				add_root(root_lookup, sh.objectid, sh.offset,
 					 0, 0, dir_id, name, name_len, 0, 0, 0,
-					 NULL, NULL);
+					 NULL, NULL, NULL);
 			} else if (sh.type == BTRFS_ROOT_ITEM_KEY) {
 				ri = (struct btrfs_root_item *)(args.buf + off);
 				gen = btrfs_root_generation(ri);
@@ -1053,16 +1054,18 @@ static int __list_subvol_search(int fd, struct root_lookup *root_lookup)
 					ogen = btrfs_root_otransid(ri);
 					memcpy(uuid, ri->uuid, BTRFS_UUID_SIZE);
 					memcpy(puuid, ri->parent_uuid, BTRFS_UUID_SIZE);
+					memcpy(ruuid, ri->received_uuid, BTRFS_UUID_SIZE);
 				} else {
 					t = 0;
 					ogen = 0;
 					memset(uuid, 0, BTRFS_UUID_SIZE);
 					memset(puuid, 0, BTRFS_UUID_SIZE);
+					memset(ruuid, 0, BTRFS_UUID_SIZE);
 				}
 
 				add_root(root_lookup, sh.objectid, 0,
 					 sh.offset, flags, 0, NULL, 0, ogen,
-					 gen, t, uuid, puuid);
+					 gen, t, uuid, puuid, ruuid);
 			}
 
 			off += sh.len;
@@ -1228,11 +1231,6 @@ int btrfs_list_setup_filter(struct btrfs_list_filter_set **filter_set,
 	BUG_ON(filter >= BTRFS_LIST_FILTER_MAX);
 	BUG_ON(set->nfilters > set->total);
 
-	if (filter == BTRFS_LIST_FILTER_DELETED) {
-		set->only_deleted = 1;
-		return 0;
-	}
-
 	if (set->nfilters == set->total) {
 		size = set->total + BTRFS_LIST_NFILTERS_INCREASE;
 		size = sizeof(*set) + size * sizeof(struct btrfs_list_filter);
@@ -1251,6 +1249,9 @@ int btrfs_list_setup_filter(struct btrfs_list_filter_set **filter_set,
 
 	BUG_ON(set->filters[set->nfilters].filter_func);
 
+	if (filter == BTRFS_LIST_FILTER_DELETED)
+		set->only_deleted = 1;
+
 	set->filters[set->nfilters].filter_func = all_filter_funcs[filter];
 	set->filters[set->nfilters].data = data;
 	set->nfilters++;
@@ -1262,7 +1263,7 @@ static int filter_root(struct root_info *ri,
 {
 	int i, ret;
 
-	if (!set || !set->nfilters)
+	if (!set)
 		return 1;
 
 	if (set->only_deleted && !ri->deleted)
@@ -1331,7 +1332,7 @@ static void print_subvolume_column(struct root_info *subv,
 				   enum btrfs_list_column_enum column)
 {
 	char tstr[256];
-	char uuidparse[37];
+	char uuidparse[BTRFS_UUID_UNPARSED_SIZE];
 
 	BUG_ON(column >= BTRFS_LIST_ALL || column < 0);
 
@@ -1373,6 +1374,13 @@ static void print_subvolume_column(struct root_info *subv,
 			strcpy(uuidparse, "-");
 		else
 			uuid_unparse(subv->puuid, uuidparse);
+		printf("%s", uuidparse);
+		break;
+	case BTRFS_LIST_RUUID:
+		if (uuid_is_null(subv->ruuid))
+			strcpy(uuidparse, "-");
+		else
+			uuid_unparse(subv->ruuid, uuidparse);
 		printf("%s", uuidparse);
 		break;
 	case BTRFS_LIST_PATH:
@@ -1866,32 +1874,24 @@ int btrfs_list_parse_filter_string(char *opt_arg,
 {
 
 	u64 arg;
-	char *ptr_parse_end = NULL;
-	char *ptr_opt_arg_end = opt_arg + strlen(opt_arg);
 
 	switch (*(opt_arg++)) {
 	case '+':
-		arg = (u64)strtol(opt_arg, &ptr_parse_end, 10);
+		arg = arg_strtou64(opt_arg);
 		type += 2;
-		if (ptr_parse_end != ptr_opt_arg_end)
-			return -1;
 
 		btrfs_list_setup_filter(filters, type, arg);
 		break;
 	case '-':
-		arg = (u64)strtoll(opt_arg, &ptr_parse_end, 10);
+		arg = arg_strtou64(opt_arg);
 		type += 1;
-		if (ptr_parse_end != ptr_opt_arg_end)
-			return -1;
 
 		btrfs_list_setup_filter(filters, type, arg);
 		break;
 	default:
 		opt_arg--;
-		arg = (u64)strtoll(opt_arg, &ptr_parse_end, 10);
+		arg = arg_strtou64(opt_arg);
 
-		if (ptr_parse_end != ptr_opt_arg_end)
-			return -1;
 		btrfs_list_setup_filter(filters, type, arg);
 		break;
 	}

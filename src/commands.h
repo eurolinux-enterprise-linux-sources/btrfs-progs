@@ -14,8 +14,6 @@
  * Boston, MA 021110-1307, USA.
  */
 
-#define ARGV0_BUF_SIZE	64
-
 struct cmd_struct {
 	const char *token;
 	int (*fn)(int, char **);
@@ -62,10 +60,6 @@ struct cmd_group {
 /* btrfs.c */
 int prefixcmp(const char *str, const char *prefix);
 
-int check_argc_exact(int nargs, int expected);
-int check_argc_min(int nargs, int expected);
-int check_argc_max(int nargs, int expected);
-
 int handle_command_group(const struct cmd_group *grp, int argc,
 			 char **argv);
 
@@ -87,6 +81,7 @@ extern const struct cmd_group balance_cmd_group;
 extern const struct cmd_group device_cmd_group;
 extern const struct cmd_group scrub_cmd_group;
 extern const struct cmd_group inspect_cmd_group;
+extern const struct cmd_group property_cmd_group;
 extern const struct cmd_group quota_cmd_group;
 extern const struct cmd_group qgroup_cmd_group;
 extern const struct cmd_group replace_cmd_group;
@@ -109,6 +104,7 @@ int cmd_check(int argc, char **argv);
 int cmd_chunk_recover(int argc, char **argv);
 int cmd_super_recover(int argc, char **argv);
 int cmd_inspect(int argc, char **argv);
+int cmd_property(int argc, char **argv);
 int cmd_send(int argc, char **argv);
 int cmd_receive(int argc, char **argv);
 int cmd_quota(int argc, char **argv);
@@ -124,5 +120,4 @@ int cmd_rescue(int argc, char **argv);
 int test_issubvolume(char *path);
 
 /* send.c */
-int find_mount_root(const char *path, char **mount_root);
 char *get_subvol_name(char *mnt, char *full_path);

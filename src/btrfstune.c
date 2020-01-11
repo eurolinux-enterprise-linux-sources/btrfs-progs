@@ -56,6 +56,7 @@ static int update_seeding_flag(struct btrfs_root *root, int set_flag)
 			return 1;
 		}
 		super_flags &= ~BTRFS_SUPER_FLAG_SEEDING;
+		fprintf(stderr, "Warning: Seeding flag cleared.\n");
 	}
 
 	trans = btrfs_start_transaction(root, 1);
@@ -100,9 +101,10 @@ static int enable_skinny_metadata(struct btrfs_root *root)
 static void print_usage(void)
 {
 	fprintf(stderr, "usage: btrfstune [options] device\n");
-	fprintf(stderr, "\t-S value\tenable/disable seeding\n");
+	fprintf(stderr, "\t-S value\tpositive value will enable seeding, zero to disable, negative is not allowed\n");
 	fprintf(stderr, "\t-r \t\tenable extended inode refs\n");
-	fprintf(stderr, "\t-x enable skinny metadata extent refs\n");
+	fprintf(stderr, "\t-x \t\tenable skinny metadata extent refs\n");
+	fprintf(stderr, "\t-f \t\tforce to clear flags, make sure that you are aware of the dangers\n");
 }
 
 int main(int argc, char *argv[])
@@ -111,18 +113,20 @@ int main(int argc, char *argv[])
 	int success = 0;
 	int extrefs_flag = 0;
 	int seeding_flag = 0;
-	int seeding_value = 0;
+	u64 seeding_value = 0;
 	int skinny_flag = 0;
+	int force = 0;
 	int ret;
 
+	optind = 1;
 	while(1) {
-		int c = getopt(argc, argv, "S:rx");
+		int c = getopt(argc, argv, "S:rxf");
 		if (c < 0)
 			break;
 		switch(c) {
 		case 'S':
 			seeding_flag = 1;
-			seeding_value = atoi(optarg);
+			seeding_value = arg_strtou64(optarg);
 			break;
 		case 'r':
 			extrefs_flag = 1;
@@ -130,20 +134,36 @@ int main(int argc, char *argv[])
 		case 'x':
 			skinny_flag = 1;
 			break;
+		case 'f':
+			force = 1;
+			break;
 		default:
 			print_usage();
 			return 1;
 		}
 	}
 
+	set_argv0(argv);
 	argc = argc - optind;
 	device = argv[optind];
-	if (argc != 1) {
+	if (check_argc_exact(argc, 1)) {
 		print_usage();
 		return 1;
 	}
 
-	if (check_mounted(device)) {
+	if (!(seeding_flag + extrefs_flag + skinny_flag)) {
+		fprintf(stderr,
+			"ERROR: At least one option should be assigned.\n");
+		print_usage();
+		return 1;
+	}
+
+	ret = check_mounted(device);
+	if (ret < 0) {
+		fprintf(stderr, "Could not check mount status: %s\n",
+			strerror(-ret));
+		return 1;
+	} else if (ret) {
 		fprintf(stderr, "%s is mounted\n", device);
 		return 1;
 	}
@@ -156,6 +176,15 @@ int main(int argc, char *argv[])
 	}
 
 	if (seeding_flag) {
+		if (!seeding_value && !force) {
+			fprintf(stderr, "Warning: This is dangerous, clearing the seeding flag may cause the derived device not to be mountable!\n");
+			ret = ask_user("We are going to clear the seeding flag, are you sure?");
+			if (!ret) {
+				fprintf(stderr, "Clear seeding flag canceled\n");
+				return 1;
+			}
+		}
+
 		ret = update_seeding_flag(root, seeding_value);
 		if (!ret)
 			success++;
@@ -176,6 +205,7 @@ int main(int argc, char *argv[])
 	} else {
 		root->fs_info->readonly = 1;
 		ret = 1;
+		fprintf(stderr, "btrfstune failed\n");
 	}
 	close_ctree(root);
 

@@ -34,7 +34,7 @@
 #include <getopt.h>
 #include <uuid/uuid.h>
 #include <ctype.h>
-#include <attr/xattr.h>
+#include <sys/xattr.h>
 #include <blkid/blkid.h>
 #include <ftw.h>
 #include "ctree.h"
@@ -165,6 +165,7 @@ static void __recow_root(struct btrfs_trans_handle *trans,
 	struct extent_buffer *tmp;
 
 	if (trans->transid != btrfs_root_generation(&root->root_item)) {
+		extent_buffer_get(root->node);
 		ret = __btrfs_cow_block(trans, root, root->node,
 					NULL, 0, &tmp, 0, 0);
 		BUG_ON(ret);
@@ -209,7 +210,7 @@ static int create_one_raid_group(struct btrfs_trans_handle *trans,
 static int create_raid_groups(struct btrfs_trans_handle *trans,
 			      struct btrfs_root *root, u64 data_profile,
 			      int data_profile_opt, u64 metadata_profile,
-			      int metadata_profile_opt, int mixed, int ssd)
+			      int mixed)
 {
 	u64 num_devices = btrfs_super_num_devices(root->fs_info->super_copy);
 	int ret;
@@ -287,6 +288,7 @@ static void print_usage(void)
 	fprintf(stderr, "\t -r --rootdir the source directory\n");
 	fprintf(stderr, "\t -K --nodiscard do not perform whole device TRIM\n");
 	fprintf(stderr, "\t -O --features comma separated list of filesystem features\n");
+	fprintf(stderr, "\t -U --uuid specify the filesystem UUID\n");
 	fprintf(stderr, "\t -V --version print the mkfs.btrfs version and exit\n");
 	fprintf(stderr, "%s\n", BTRFS_BUILD_VERSION);
 	exit(1);
@@ -349,7 +351,8 @@ static struct option long_options[] = {
 	{ "version", 0, NULL, 'V' },
 	{ "rootdir", 1, NULL, 'r' },
 	{ "nodiscard", 0, NULL, 'K' },
-	{ "features", 0, NULL, 'O' },
+	{ "features", 1, NULL, 'O' },
+	{ "uuid", required_argument, NULL, 'U' },
 	{ NULL, 0, NULL, 0}
 };
 
@@ -379,7 +382,10 @@ static int add_directory_items(struct btrfs_trans_handle *trans,
 	ret = btrfs_insert_dir_item(trans, root, name, name_len,
 				    parent_inum, &location,
 				    filetype, index_cnt);
-
+	if (ret)
+		return ret;
+	ret = btrfs_insert_inode_ref(trans, root, name, name_len,
+				     objectid, parent_inum, index_cnt);
 	*dir_index_cnt = index_cnt;
 	index_cnt++;
 
@@ -492,9 +498,7 @@ static int add_inode_items(struct btrfs_trans_handle *trans,
 	struct btrfs_inode_item btrfs_inode;
 	u64 objectid;
 	u64 inode_size = 0;
-	int name_len;
 
-	name_len = strlen(name);
 	fill_inode_item(trans, root, &btrfs_inode, st);
 	objectid = self_objectid;
 
@@ -508,16 +512,8 @@ static int add_inode_items(struct btrfs_trans_handle *trans,
 	btrfs_set_key_type(&inode_key, BTRFS_INODE_ITEM_KEY);
 
 	ret = btrfs_insert_inode(trans, root, objectid, &btrfs_inode);
-	if (ret)
-		goto fail;
-
-	ret = btrfs_insert_inode_ref(trans, root, name, name_len,
-				     objectid, parent_inum, dir_index_cnt);
-	if (ret)
-		goto fail;
 
 	*inode_ret = btrfs_inode;
-fail:
 	return ret;
 }
 
@@ -617,6 +613,9 @@ static int add_file_items(struct btrfs_trans_handle *trans,
 	u64 total_bytes;
 	struct extent_buffer *eb = NULL;
 	int fd;
+
+	if (st->st_size == 0)
+		return 0;
 
 	fd = open(path_name, O_RDONLY);
 	if (fd == -1) {
@@ -720,8 +719,7 @@ again:
 		goto again;
 
 end:
-	if (eb)
-		free(eb);
+	free(eb);
 	close(fd);
 	return ret;
 }
@@ -756,6 +754,7 @@ static int traverse_directory(struct btrfs_trans_handle *trans,
 	ino_t parent_inum, cur_inum;
 	ino_t highest_inum = 0;
 	char *parent_dir_name;
+	char real_path[PATH_MAX];
 	struct btrfs_path path;
 	struct extent_buffer *leaf;
 	struct btrfs_key root_dir_key;
@@ -764,7 +763,12 @@ static int traverse_directory(struct btrfs_trans_handle *trans,
 	/* Add list for source directory */
 	dir_entry = malloc(sizeof(struct directory_name_entry));
 	dir_entry->dir_name = dir_name;
-	dir_entry->path = strdup(dir_name);
+	dir_entry->path = realpath(dir_name, real_path);
+	if (!dir_entry->path) {
+		fprintf(stderr, "get directory real path error\n");
+		ret = -1;
+		goto fail_no_dir;
+	}
 
 	parent_inum = highest_inum + BTRFS_FIRST_FREE_OBJECTID;
 	dir_entry->inum = parent_inum;
@@ -778,7 +782,7 @@ static int traverse_directory(struct btrfs_trans_handle *trans,
 	ret = btrfs_lookup_inode(trans, root, &path, &root_dir_key, 1);
 	if (ret) {
 		fprintf(stderr, "root dir lookup error\n");
-		return -1;
+		goto fail_no_dir;
 	}
 
 	leaf = path.nodes[0];
@@ -802,6 +806,7 @@ static int traverse_directory(struct btrfs_trans_handle *trans,
 		if (chdir(parent_dir_entry->path)) {
 			fprintf(stderr, "chdir error for %s\n",
 				parent_dir_name);
+			ret = -1;
 			goto fail_no_files;
 		}
 
@@ -811,6 +816,7 @@ static int traverse_directory(struct btrfs_trans_handle *trans,
 		{
 			fprintf(stderr, "scandir for %s failed: %s\n",
 				parent_dir_name, strerror (errno));
+			ret = -1;
 			goto fail;
 		}
 
@@ -820,10 +826,11 @@ static int traverse_directory(struct btrfs_trans_handle *trans,
 			if (lstat(cur_file->d_name, &st) == -1) {
 				fprintf(stderr, "lstat failed for file %s\n",
 					cur_file->d_name);
+				ret = -1;
 				goto fail;
 			}
 
-			cur_inum = ++highest_inum + BTRFS_FIRST_FREE_OBJECTID;
+			cur_inum = st.st_ino;
 			ret = add_directory_items(trans, root,
 						  cur_inum, parent_inum,
 						  cur_file->d_name,
@@ -837,6 +844,10 @@ static int traverse_directory(struct btrfs_trans_handle *trans,
 					      cur_file->d_name, cur_inum,
 					      parent_inum, dir_index_cnt,
 					      &cur_inode);
+			if (ret == -EEXIST) {
+				BUG_ON(st.st_nlink <= 1);
+				continue;
+			}
 			if (ret) {
 				fprintf(stderr, "add_inode_items failed\n");
 				goto fail;
@@ -876,20 +887,22 @@ static int traverse_directory(struct btrfs_trans_handle *trans,
 		}
 
 		free_namelist(files, count);
-		free(parent_dir_entry->path);
 		free(parent_dir_entry);
 
 		index_cnt = 2;
 
 	} while (!list_empty(&dir_head->list));
 
-	return 0;
+out:
+	return !!ret;
 fail:
 	free_namelist(files, count);
 fail_no_files:
-	free(parent_dir_entry->path);
 	free(parent_dir_entry);
-	return -1;
+	goto out;
+fail_no_dir:
+	free(dir_entry);
+	goto out;
 }
 
 static int open_target(char *output_name)
@@ -954,7 +967,7 @@ static int make_image(char *source_dir, struct btrfs_root *root, int out_fd)
 	ret = lstat(source_dir, &root_st);
 	if (ret) {
 		fprintf(stderr, "unable to lstat the %s\n", source_dir);
-		goto fail;
+		goto out;
 	}
 
 	INIT_LIST_HEAD(&dir_head.list);
@@ -976,6 +989,7 @@ fail:
 		list_del(&dir_entry->list);
 		free(dir_entry);
 	}
+out:
 	fprintf(stderr, "Making image is aborted.\n");
 	return -1;
 }
@@ -1147,6 +1161,8 @@ static const struct btrfs_fs_feature {
 		"raid56 extended format" },
 	{ "skinny-metadata", BTRFS_FEATURE_INCOMPAT_SKINNY_METADATA,
 		"reduced-size metadata extent refs" },
+	{ "no-holes", BTRFS_FEATURE_INCOMPAT_NO_HOLES,
+		"no explicit hole extents for files" },
 	/* Keep this one last */
 	{ "list-all", BTRFS_FEATURE_LIST_ALL, NULL }
 };
@@ -1194,8 +1210,7 @@ static void process_fs_features(u64 flags)
 
 	for (i = 0; i < ARRAY_SIZE(mkfs_features); i++) {
 		if (flags & mkfs_features[i].flag) {
-			fprintf(stderr,
-				"Turning ON incompat feature '%s': %s\n",
+			printf("Turning ON incompat feature '%s': %s\n",
 				mkfs_features[i].name,
 				mkfs_features[i].desc);
 		}
@@ -1260,11 +1275,12 @@ int main(int ac, char **av)
 	int dev_cnt = 0;
 	int saved_optind;
 	char estr[100];
+	char *fs_uuid = NULL;
 	u64 features = DEFAULT_MKFS_FEATURES;
 
 	while(1) {
 		int c;
-		c = getopt_long(ac, av, "A:b:fl:n:s:m:d:L:O:r:VMK",
+		c = getopt_long(ac, av, "A:b:fl:n:s:m:d:L:O:r:U:VMK",
 				long_options, &option_index);
 		if (c < 0)
 			break;
@@ -1319,9 +1335,9 @@ int main(int ac, char **av)
 				break;
 			case 'b':
 				block_count = parse_size(optarg);
-				if (block_count <= 1024*1024*1024) {
-					printf("SMALL VOLUME: forcing mixed "
-					       "metadata/data groups\n");
+				if (block_count <= BTRFS_MKFS_SMALL_VOLUME_SIZE) {
+					fprintf(stdout,
+				"SMALL VOLUME: forcing mixed metadata/data groups\n");
 					mixed = 1;
 				}
 				zero_end = 0;
@@ -1332,6 +1348,9 @@ int main(int ac, char **av)
 			case 'r':
 				source_dir = optarg;
 				source_dir_set = 1;
+				break;
+			case 'U':
+				fs_uuid = optarg;
 				break;
 			case 'K':
 				discard = 0;
@@ -1355,6 +1374,20 @@ int main(int ac, char **av)
 			"The -r option is limited to a single device\n");
 		exit(1);
 	}
+
+	if (fs_uuid) {
+		uuid_t dummy_uuid;
+
+		if (uuid_parse(fs_uuid, dummy_uuid) != 0) {
+			fprintf(stderr, "could not parse UUID: %s\n", fs_uuid);
+			exit(1);
+		}
+		if (!test_uuid_unique(fs_uuid)) {
+			fprintf(stderr, "non-unique UUID: %s\n", fs_uuid);
+			exit(1);
+		}
+	}
+	
 	while (dev_cnt-- > 0) {
 		file = av[optind++];
 		if (is_block_device(file))
@@ -1418,6 +1451,36 @@ int main(int ac, char **av)
 		}
 	}
 
+	/* Check device/block_count after the leafsize is determined */
+	if (block_count && block_count < btrfs_min_dev_size(leafsize)) {
+		fprintf(stderr,
+			"Size '%llu' is too small to make a usable filesystem\n",
+			block_count);
+		fprintf(stderr,
+			"Minimum size for btrfs filesystem is %llu\n",
+			btrfs_min_dev_size(leafsize));
+		exit(1);
+	}
+	for (i = saved_optind; i < saved_optind + dev_cnt; i++) {
+		char *path;
+
+		path = av[i];
+		ret = test_minimum_size(path, leafsize);
+		if (ret < 0) {
+			fprintf(stderr, "Failed to check size for '%s': %s\n",
+				path, strerror(-ret));
+			exit (1);
+		}
+		if (ret > 0) {
+			fprintf(stderr,
+				"'%s' is too small to make a usable filesystem\n",
+				path);
+			fprintf(stderr,
+				"Minimum size for each btrfs device is %llu.\n",
+				btrfs_min_dev_size(leafsize));
+			exit(1);
+		}
+	}
 	ret = test_num_disk_vs_raid(metadata_profile, data_profile,
 			dev_cnt, mixed, estr);
 	if (ret) {
@@ -1426,8 +1489,8 @@ int main(int ac, char **av)
 	}
 
 	/* if we are here that means all devs are good to btrfsify */
-	printf("\nWARNING! - %s IS EXPERIMENTAL\n", BTRFS_BUILD_VERSION);
-	printf("WARNING! - see http://btrfs.wiki.kernel.org before using\n\n");
+	printf("%s\n", BTRFS_BUILD_VERSION);
+	printf("See http://btrfs.wiki.kernel.org for more information.\n\n");
 
 	dev_cnt--;
 
@@ -1446,6 +1509,10 @@ int main(int ac, char **av)
 		first_file = file;
 		ret = btrfs_prepare_device(fd, file, zero_end, &dev_block_count,
 					   block_count, &mixed, discard);
+		if (ret) {
+			close(fd);
+			exit(1);
+		}
 		if (block_count && block_count > dev_block_count) {
 			fprintf(stderr, "%s is smaller than requested size\n", file);
 			exit(1);
@@ -1497,7 +1564,7 @@ int main(int ac, char **av)
 
 	process_fs_features(features);
 
-	ret = make_btrfs(fd, file, label, blocks, dev_block_count,
+	ret = make_btrfs(fd, file, label, fs_uuid, blocks, dev_block_count,
 			 nodesize, leafsize,
 			 sectorsize, stripesize, features);
 	if (ret) {
@@ -1526,7 +1593,6 @@ int main(int ac, char **av)
 
 	btrfs_register_one_device(file);
 
-	zero_end = 1;
 	while (dev_cnt-- > 0) {
 		int old_mixed = mixed;
 
@@ -1553,8 +1619,11 @@ int main(int ac, char **av)
 		}
 		ret = btrfs_prepare_device(fd, file, zero_end, &dev_block_count,
 					   block_count, &mixed, discard);
+		if (ret) {
+			close(fd);
+			exit(1);
+		}
 		mixed = old_mixed;
-		BUG_ON(ret);
 
 		ret = btrfs_add_to_fsid(trans, root, fd, file, dev_block_count,
 					sectorsize, sectorsize, sectorsize);
@@ -1566,7 +1635,7 @@ raid_groups:
 	if (!source_dir_set) {
 		ret = create_raid_groups(trans, root, data_profile,
 				 data_profile_opt, metadata_profile,
-				 metadata_profile_opt, mixed, ssd);
+				 mixed);
 		BUG_ON(ret);
 	}
 
@@ -1578,7 +1647,6 @@ raid_groups:
 	    label, first_file, nodesize, leafsize, sectorsize,
 	    pretty_size(btrfs_super_total_bytes(root->fs_info->super_copy)));
 
-	printf("%s\n", BTRFS_BUILD_VERSION);
 	btrfs_commit_transaction(trans, root);
 
 	if (source_dir_set) {

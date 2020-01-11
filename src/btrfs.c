@@ -22,6 +22,7 @@
 #include "crc32c.h"
 #include "commands.h"
 #include "version.h"
+#include "utils.h"
 
 static const char * const btrfs_cmd_group_usage[] = {
 	"btrfs [--help] [--version] <group> [<group>...] <command> [<args>]",
@@ -30,8 +31,6 @@ static const char * const btrfs_cmd_group_usage[] = {
 
 static const char btrfs_cmd_group_info[] =
 	"Use --help as an argument for information on a specific group or command.";
-
-static char argv0_buf[ARGV0_BUF_SIZE] = "btrfs";
 
 static inline const char *skip_prefix(const char *str, const char *prefix)
 {
@@ -125,14 +124,6 @@ static void handle_help_options_next_level(const struct cmd_struct *cmd,
 	}
 }
 
-static void fixup_argv0(char **argv, const char *token)
-{
-	int len = strlen(argv0_buf);
-
-	snprintf(argv0_buf + len, sizeof(argv0_buf) - len, " %s", token);
-	argv[0] = argv0_buf;
-}
-
 int handle_command_group(const struct cmd_group *grp, int argc,
 			 char **argv)
 
@@ -152,36 +143,6 @@ int handle_command_group(const struct cmd_group *grp, int argc,
 
 	fixup_argv0(argv, cmd->token);
 	return cmd->fn(argc, argv);
-}
-
-int check_argc_exact(int nargs, int expected)
-{
-	if (nargs < expected)
-		fprintf(stderr, "%s: too few arguments\n", argv0_buf);
-	if (nargs > expected)
-		fprintf(stderr, "%s: too many arguments\n", argv0_buf);
-
-	return nargs != expected;
-}
-
-int check_argc_min(int nargs, int expected)
-{
-	if (nargs < expected) {
-		fprintf(stderr, "%s: too few arguments\n", argv0_buf);
-		return 1;
-	}
-
-	return 0;
-}
-
-int check_argc_max(int nargs, int expected)
-{
-	if (nargs > expected) {
-		fprintf(stderr, "%s: too many arguments\n", argv0_buf);
-		return 1;
-	}
-
-	return 0;
 }
 
 static const struct cmd_group btrfs_cmd_group;
@@ -212,31 +173,20 @@ static int cmd_version(int argc, char **argv)
 	return 0;
 }
 
-static int handle_options(int *argc, char ***argv)
+static void handle_options(int *argc, char ***argv)
 {
-	char **orig_argv = *argv;
-
-	while (*argc > 0) {
+	if (*argc > 0) {
 		const char *arg = (*argv)[0];
-		if (arg[0] != '-')
-			break;
-
-		if (!strcmp(arg, "--help")) {
-			break;
-		} else if (!strcmp(arg, "--version")) {
-			break;
-		} else {
-			fprintf(stderr, "Unknown option: %s\n", arg);
-			fprintf(stderr, "usage: %s\n",
-				btrfs_cmd_group.usagestr[0]);
-			exit(129);
-		}
-
-		(*argv)++;
-		(*argc)--;
+		if (arg[0] != '-' ||
+		    !strcmp(arg, "--help") ||
+		    !strcmp(arg, "--version"))
+			return;
+		fprintf(stderr, "Unknown option: %s\n", arg);
+		fprintf(stderr, "usage: %s\n",
+			btrfs_cmd_group.usagestr[0]);
+		exit(129);
 	}
-
-	return (*argv) - orig_argv;
+	return;
 }
 
 static const struct cmd_group btrfs_cmd_group = {
@@ -250,6 +200,7 @@ static const struct cmd_group btrfs_cmd_group = {
 		{ "rescue", cmd_rescue, NULL, &rescue_cmd_group, 0 },
 		{ "restore", cmd_restore, cmd_restore_usage, NULL, 0 },
 		{ "inspect-internal", cmd_inspect, NULL, &inspect_cmd_group, 0 },
+		{ "property", cmd_property, NULL, &property_cmd_group, 0 },
 		{ "send", cmd_send, cmd_send_usage, NULL, 0 },
 		{ "receive", cmd_receive, cmd_receive_usage, NULL, 0 },
 		{ "quota", cmd_quota, NULL, &quota_cmd_group, 0 },

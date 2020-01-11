@@ -134,31 +134,26 @@ struct extent_buffer *btrfs_find_create_tree_block(struct btrfs_root *root,
 				   blocksize);
 }
 
-int readahead_tree_block(struct btrfs_root *root, u64 bytenr, u32 blocksize,
-			 u64 parent_transid)
+void readahead_tree_block(struct btrfs_root *root, u64 bytenr, u32 blocksize,
+			  u64 parent_transid)
 {
-	int ret;
 	struct extent_buffer *eb;
 	u64 length;
 	struct btrfs_multi_bio *multi = NULL;
 	struct btrfs_device *device;
 
 	eb = btrfs_find_tree_block(root, bytenr, blocksize);
-	if (eb && btrfs_buffer_uptodate(eb, parent_transid)) {
-		free_extent_buffer(eb);
-		return 0;
+	if (!(eb && btrfs_buffer_uptodate(eb, parent_transid)) &&
+	    !btrfs_map_block(&root->fs_info->mapping_tree, READ,
+			     bytenr, &length, &multi, 0, NULL)) {
+		device = multi->stripes[0].dev;
+		device->total_ios++;
+		blocksize = min(blocksize, (u32)(64 * 1024));
+		readahead(device->fd, multi->stripes[0].physical, blocksize);
 	}
 
-	length = blocksize;
-	ret = btrfs_map_block(&root->fs_info->mapping_tree, READ,
-			      bytenr, &length, &multi, 0, NULL);
-	BUG_ON(ret);
-	device = multi->stripes[0].dev;
-	device->total_ios++;
-	blocksize = min(blocksize, (u32)(64 * 1024));
-	readahead(device->fd, multi->stripes[0].physical, blocksize);
+	free_extent_buffer(eb);
 	kfree(multi);
-	return 0;
 }
 
 static int verify_parent_transid(struct extent_io_tree *io_tree,
@@ -206,7 +201,8 @@ int read_whole_eb(struct btrfs_fs_info *info, struct extent_buffer *eb, int mirr
 		read_len = bytes_left;
 		device = NULL;
 
-		if (!info->on_restoring) {
+		if (!info->on_restoring &&
+		    eb->start != BTRFS_SUPER_INFO_OFFSET) {
 			ret = btrfs_map_block(&info->mapping_tree, READ,
 					      eb->start + offset, &read_len, &multi,
 					      mirror, NULL);
@@ -297,7 +293,7 @@ struct extent_buffer *read_tree_block(struct btrfs_root *root, u64 bytenr,
 			ignore = 1;
 			continue;
 		}
-		if (btrfs_header_generation(eb) > best_transid) {
+		if (btrfs_header_generation(eb) > best_transid && mirror_num) {
 			best_transid = btrfs_header_generation(eb);
 			good_mirror = mirror_num;
 		}
@@ -344,7 +340,7 @@ int write_and_map_eb(struct btrfs_trans_handle *trans,
 	return 0;
 }
 
-int write_tree_block(struct btrfs_trans_handle *trans,
+static int write_tree_block(struct btrfs_trans_handle *trans,
 		     struct btrfs_root *root,
 		     struct extent_buffer *eb)
 {
@@ -569,7 +565,6 @@ static int find_and_setup_log_root(struct btrfs_root *tree_root,
 	return 0;
 }
 
-
 int btrfs_free_fs_root(struct btrfs_root *root)
 {
 	if (root->node)
@@ -634,7 +629,6 @@ struct btrfs_root *btrfs_read_fs_root_no_cache(struct btrfs_fs_info *fs_info,
 	memcpy(&root->root_key, location, sizeof(*location));
 	ret = 0;
 out:
-	btrfs_release_path(path);
 	btrfs_free_path(path);
 	if (ret) {
 		free(root);
@@ -644,7 +638,10 @@ out:
 	blocksize = btrfs_level_size(root, btrfs_root_level(&root->root_item));
 	root->node = read_tree_block(root, btrfs_root_bytenr(&root->root_item),
 				     blocksize, generation);
-	BUG_ON(!root->node);
+	if (!root->node) {
+		free(root);
+		return ERR_PTR(-EIO);
+	}
 insert:
 	root->ref_cows = 1;
 	return root;
@@ -680,6 +677,7 @@ struct btrfs_root *btrfs_read_fs_root(struct btrfs_fs_info *fs_info,
 	struct btrfs_root *root;
 	struct rb_node *node;
 	int ret;
+	u64 objectid = location->objectid;
 
 	if (location->objectid == BTRFS_ROOT_TREE_OBJECTID)
 		return fs_info->tree_root;
@@ -691,11 +689,13 @@ struct btrfs_root *btrfs_read_fs_root(struct btrfs_fs_info *fs_info,
 		return fs_info->dev_root;
 	if (location->objectid == BTRFS_CSUM_TREE_OBJECTID)
 		return fs_info->csum_root;
+	if (location->objectid == BTRFS_QUOTA_TREE_OBJECTID)
+		return fs_info->csum_root;
 
 	BUG_ON(location->objectid == BTRFS_TREE_RELOC_OBJECTID ||
 	       location->offset != (u64)-1);
 
-	node = rb_search(&fs_info->fs_root_tree, (void *)&location->objectid,
+	node = rb_search(&fs_info->fs_root_tree, (void *)&objectid,
 			 btrfs_fs_roots_compare_objectids, NULL);
 	if (node)
 		return container_of(node, struct btrfs_root, rb_node);
@@ -717,6 +717,7 @@ void btrfs_free_fs_info(struct btrfs_fs_info *fs_info)
 	free(fs_info->chunk_root);
 	free(fs_info->dev_root);
 	free(fs_info->csum_root);
+	free(fs_info->quota_root);
 	free(fs_info->super_copy);
 	free(fs_info->log_root_tree);
 	free(fs_info);
@@ -737,11 +738,13 @@ struct btrfs_fs_info *btrfs_new_fs_info(int writable, u64 sb_bytenr)
 	fs_info->chunk_root = malloc(sizeof(struct btrfs_root));
 	fs_info->dev_root = malloc(sizeof(struct btrfs_root));
 	fs_info->csum_root = malloc(sizeof(struct btrfs_root));
+	fs_info->quota_root = malloc(sizeof(struct btrfs_root));
 	fs_info->super_copy = malloc(BTRFS_SUPER_INFO_SIZE);
 
 	if (!fs_info->tree_root || !fs_info->extent_root ||
 	    !fs_info->chunk_root || !fs_info->dev_root ||
-	    !fs_info->csum_root || !fs_info->super_copy)
+	    !fs_info->csum_root || !fs_info->quota_root ||
+	    !fs_info->super_copy)
 		goto free_all;
 
 	memset(fs_info->super_copy, 0, BTRFS_SUPER_INFO_SIZE);
@@ -750,6 +753,7 @@ struct btrfs_fs_info *btrfs_new_fs_info(int writable, u64 sb_bytenr)
 	memset(fs_info->chunk_root, 0, sizeof(struct btrfs_root));
 	memset(fs_info->dev_root, 0, sizeof(struct btrfs_root));
 	memset(fs_info->csum_root, 0, sizeof(struct btrfs_root));
+	memset(fs_info->quota_root, 0, sizeof(struct btrfs_root));
 
 	extent_io_tree_init(&fs_info->extent_cache);
 	extent_io_tree_init(&fs_info->free_space_cache);
@@ -877,7 +881,17 @@ int btrfs_setup_all_roots(struct btrfs_fs_info *fs_info, u64 root_tree_bytenr,
 				  fs_info->extent_root);
 	if (ret) {
 		printk("Couldn't setup extent tree\n");
-		return -EIO;
+		if (!(flags & OPEN_CTREE_PARTIAL))
+			return -EIO;
+		/* Need a blank node here just so we don't screw up in the
+		 * million of places that assume a root has a valid ->node
+		 */
+		fs_info->extent_root->node =
+			btrfs_find_create_tree_block(fs_info->extent_root, 0,
+						     leafsize);
+		if (!fs_info->extent_root->node)
+			return -ENOMEM;
+		clear_extent_buffer_uptodate(NULL, fs_info->extent_root->node);
 	}
 	fs_info->extent_root->track_dirty = 1;
 
@@ -898,6 +912,11 @@ int btrfs_setup_all_roots(struct btrfs_fs_info *fs_info, u64 root_tree_bytenr,
 	}
 	fs_info->csum_root->track_dirty = 1;
 
+	ret = find_and_setup_root(root, fs_info, BTRFS_QUOTA_TREE_OBJECTID,
+				  fs_info->quota_root);
+	if (ret == 0)
+		fs_info->quota_enabled = 1;
+
 	ret = find_and_setup_log_root(root, fs_info, sb);
 	if (ret) {
 		printk("Couldn't setup log root tree\n");
@@ -915,13 +934,15 @@ int btrfs_setup_all_roots(struct btrfs_fs_info *fs_info, u64 root_tree_bytenr,
 	key.offset = (u64)-1;
 	fs_info->fs_root = btrfs_read_fs_root(fs_info, &key);
 
-	if (!fs_info->fs_root)
+	if (IS_ERR(fs_info->fs_root))
 		return -EIO;
 	return 0;
 }
 
 void btrfs_release_all_roots(struct btrfs_fs_info *fs_info)
 {
+	if (fs_info->quota_root)
+		free_extent_buffer(fs_info->quota_root->node);
 	if (fs_info->csum_root)
 		free_extent_buffer(fs_info->csum_root->node);
 	if (fs_info->dev_root)
@@ -966,7 +987,7 @@ void btrfs_cleanup_all_caches(struct btrfs_fs_info *fs_info)
 
 int btrfs_scan_fs_devices(int fd, const char *path,
 			  struct btrfs_fs_devices **fs_devices,
-			  u64 sb_bytenr, int run_ioctl)
+			  u64 sb_bytenr, int run_ioctl, int super_recover)
 {
 	u64 total_devs;
 	int ret;
@@ -974,7 +995,7 @@ int btrfs_scan_fs_devices(int fd, const char *path,
 		sb_bytenr = BTRFS_SUPER_INFO_OFFSET;
 
 	ret = btrfs_scan_one_device(fd, path, fs_devices,
-				    &total_devs, sb_bytenr);
+				    &total_devs, sb_bytenr, super_recover);
 	if (ret) {
 		fprintf(stderr, "No valid Btrfs found on %s\n", path);
 		return ret;
@@ -1044,6 +1065,7 @@ static struct btrfs_fs_info *__open_ctree_fd(int fp, const char *path,
 	struct btrfs_fs_devices *fs_devices = NULL;
 	struct extent_buffer *eb;
 	int ret;
+	int oflags;
 
 	if (sb_bytenr == 0)
 		sb_bytenr = BTRFS_SUPER_INFO_OFFSET;
@@ -1061,25 +1083,30 @@ static struct btrfs_fs_info *__open_ctree_fd(int fp, const char *path,
 		fs_info->on_restoring = 1;
 
 	ret = btrfs_scan_fs_devices(fp, path, &fs_devices, sb_bytenr,
-				    !(flags & OPEN_CTREE_RECOVER_SUPER));
+				    !(flags & OPEN_CTREE_RECOVER_SUPER),
+				    (flags & OPEN_CTREE_RECOVER_SUPER));
 	if (ret)
 		goto out;
 
 	fs_info->fs_devices = fs_devices;
 	if (flags & OPEN_CTREE_WRITES)
-		ret = btrfs_open_devices(fs_devices, O_RDWR);
+		oflags = O_RDWR;
 	else
-		ret = btrfs_open_devices(fs_devices, O_RDONLY);
-	if (ret)
-		goto out_devices;
+		oflags = O_RDONLY;
 
+	if (flags & OPEN_CTREE_EXCLUSIVE)
+		oflags |= O_EXCL;
+
+	ret = btrfs_open_devices(fs_devices, oflags);
+	if (ret)
+		goto out;
 
 	disk_super = fs_info->super_copy;
 	if (!(flags & OPEN_CTREE_RECOVER_SUPER))
 		ret = btrfs_read_dev_super(fs_devices->latest_bdev,
-					   disk_super, sb_bytenr);
+					   disk_super, sb_bytenr, 1);
 	else
-		ret = btrfs_read_dev_super(fp, disk_super, sb_bytenr);
+		ret = btrfs_read_dev_super(fp, disk_super, sb_bytenr, 0);
 	if (ret) {
 		printk("No valid btrfs found\n");
 		goto out_devices;
@@ -1098,7 +1125,7 @@ static struct btrfs_fs_info *__open_ctree_fd(int fp, const char *path,
 
 	eb = fs_info->chunk_root->node;
 	read_extent_buffer(eb, fs_info->chunk_tree_uuid,
-			   (unsigned long)btrfs_header_chunk_tree_uuid(eb),
+			   btrfs_header_chunk_tree_uuid(eb),
 			   BTRFS_UUID_SIZE);
 
 	ret = btrfs_setup_all_roots(fs_info, root_tree_bytenr, flags);
@@ -1163,13 +1190,15 @@ struct btrfs_root *open_ctree_fd(int fp, const char *path, u64 sb_bytenr,
 	return info->fs_root;
 }
 
-int btrfs_read_dev_super(int fd, struct btrfs_super_block *sb, u64 sb_bytenr)
+int btrfs_read_dev_super(int fd, struct btrfs_super_block *sb, u64 sb_bytenr,
+			 int super_recover)
 {
 	u8 fsid[BTRFS_FSID_SIZE];
 	int fsid_is_initialized = 0;
 	struct btrfs_super_block buf;
 	int i;
 	int ret;
+	int max_super = super_recover ? BTRFS_SUPER_MIRROR_MAX : 1;
 	u64 transid = 0;
 	u64 bytenr;
 
@@ -1186,7 +1215,14 @@ int btrfs_read_dev_super(int fd, struct btrfs_super_block *sb, u64 sb_bytenr)
 		return 0;
 	}
 
-	for (i = 0; i < BTRFS_SUPER_MIRROR_MAX; i++) {
+	/*
+	* we would like to check all the supers, but that would make
+	* a btrfs mount succeed after a mkfs from a different FS.
+	* So, we need to add a special mount option to scan for
+	* later supers, using BTRFS_SUPER_MIRROR_MAX instead
+	*/
+
+	for (i = 0; i < max_super; i++) {
 		bytenr = btrfs_sb_offset(i);
 		ret = pread64(fd, &buf, sizeof(buf), bytenr);
 		if (ret < sizeof(buf))

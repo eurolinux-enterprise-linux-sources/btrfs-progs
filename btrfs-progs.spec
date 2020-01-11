@@ -1,6 +1,6 @@
 Name:		btrfs-progs
-Version:	3.12
-Release:	4%{?dist}
+Version:	3.16.2
+Release:	1%{?dist}
 Summary:	Userspace programs for btrfs
 
 Group:		System Environment/Base
@@ -17,6 +17,7 @@ BuildRoot:	%{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 
 BuildRequires:	e2fsprogs-devel, libuuid-devel, zlib-devel
 BuildRequires:	libacl-devel, libblkid-devel, lzo-devel
+BuildRequires:	asciidoc, xmlto
 
 %define _root_sbindir /sbin
 
@@ -57,6 +58,7 @@ rm -rf $RPM_BUILD_ROOT
 %doc COPYING
 %{_libdir}/libbtrfs.so.0*
 %{_sbindir}/btrfsck
+%{_sbindir}/fsck.btrfs
 %{_sbindir}/mkfs.btrfs
 %{_sbindir}/btrfs-debug-tree
 %{_sbindir}/btrfs-image
@@ -67,23 +69,27 @@ rm -rf $RPM_BUILD_ROOT
 %{_sbindir}/btrfs-zero-log
 %{_sbindir}/btrfs-find-root
 %{_sbindir}/btrfs-show-super
-%{_mandir}/man8/btrfs-image.8.gz
-%{_mandir}/man8/btrfsck.8.gz
-%{_mandir}/man8/mkfs.btrfs.8.gz
-%{_mandir}/man8/btrfs.8.gz
-%{_mandir}/man8/btrfs-convert.8.gz
-%{_mandir}/man8/btrfs-debug-tree.8.gz
-%{_mandir}/man8/btrfs-find-root.8.gz
-%{_mandir}/man8/btrfs-map-logical.8.gz
-%{_mandir}/man8/btrfs-show-super.8.gz
-%{_mandir}/man8/btrfs-zero-log.8.gz
-%{_mandir}/man8/btrfstune.8.gz
+%{_mandir}/man8/*.gz
+%{_mandir}/man5/*.gz
 
 %files devel
 %{_includedir}/*
 %{_libdir}/libbtrfs.so
 
 %changelog
+* Mon Oct 10 2014 Eric Sandeen <sandeen@redhat.com> 3.16.2-1
+- New upstream release (#1149796)
+- Add API versioning (#1147544)
+
+* Tue Sep 02 2014 Eric Sandeen <sandeen@redhat.com> 3.16-1
+- New upstream release (#1134981)
+
+* Tue Jul 08 2014 Eric Sandeen <sandeen@redhat.com> 3.14.2-2
+- Fix btrfsck/btrfs-check manpage circular links
+
+* Thu Jun 19 2014 Eric Sandeen <sandeen@redhat.com> 3.14.2-1
+- New upstream release (#1110929)
+
 * Fri Jan 24 2014 Daniel Mach <dmach@redhat.com> - 3.12-4
 - Mass rebuild 2014-01-24
 
