@@ -19,6 +19,9 @@
 #ifndef __BTRFS_DISK_IO_H__
 #define __BTRFS_DISK_IO_H__
 
+#include "kerncompat.h"
+#include "ctree.h"
+
 #define BTRFS_SUPER_INFO_OFFSET (64 * 1024)
 #define BTRFS_SUPER_INFO_SIZE 4096
 
@@ -49,6 +52,16 @@ enum btrfs_open_ctree_flags {
 	 * tree bits.
 	 * Like split PARTIAL into SKIP_CSUM/SKIP_EXTENT
 	 */
+
+	OPEN_CTREE_IGNORE_FSID_MISMATCH	= (1 << 10),
+
+	/*
+	 * Allow open_ctree_fs_info() to return a incomplete fs_info with
+	 * system chunks from super block only.
+	 * It's useful for chunk corruption case.
+	 * Makes no sense for open_ctree variants returning btrfs_root.
+	 */
+	OPEN_CTREE_IGNORE_CHUNK_TREE_ERROR = (1 << 11)
 };
 
 static inline u64 btrfs_sb_offset(int mirror)
@@ -62,12 +75,23 @@ static inline u64 btrfs_sb_offset(int mirror)
 struct btrfs_device;
 
 int read_whole_eb(struct btrfs_fs_info *info, struct extent_buffer *eb, int mirror);
-struct extent_buffer *read_tree_block(struct btrfs_root *root, u64 bytenr,
-				      u32 blocksize, u64 parent_transid);
+struct extent_buffer* read_tree_block_fs_info(
+		struct btrfs_fs_info *fs_info, u64 bytenr, u32 blocksize,
+		u64 parent_transid);
+static inline struct extent_buffer* read_tree_block(
+		struct btrfs_root *root, u64 bytenr, u32 blocksize,
+		u64 parent_transid)
+{
+	return read_tree_block_fs_info(root->fs_info, bytenr, blocksize,
+			parent_transid);
+}
+
+int read_extent_data(struct btrfs_root *root, char *data, u64 logical,
+		     u64 *len, int mirror);
 void readahead_tree_block(struct btrfs_root *root, u64 bytenr, u32 blocksize,
 			  u64 parent_transid);
-struct extent_buffer *btrfs_find_create_tree_block(struct btrfs_root *root,
-						   u64 bytenr, u32 blocksize);
+struct extent_buffer* btrfs_find_create_tree_block(
+		struct btrfs_fs_info *fs_info, u64 bytenr, u32 blocksize);
 
 int __setup_root(u32 nodesize, u32 leafsize, u32 sectorsize,
                         u32 stripesize, struct btrfs_root *root,
@@ -94,7 +118,13 @@ struct btrfs_root *open_ctree_fd(int fp, const char *path, u64 sb_bytenr,
 struct btrfs_fs_info *open_ctree_fs_info(const char *filename,
 					 u64 sb_bytenr, u64 root_tree_bytenr,
 					 enum btrfs_open_ctree_flags flags);
-int close_ctree(struct btrfs_root *root);
+int close_ctree_fs_info(struct btrfs_fs_info *fs_info);
+static inline int close_ctree(struct btrfs_root *root)
+{
+	BUG_ON(!root);
+	return close_ctree_fs_info(root->fs_info);
+}
+
 int write_all_supers(struct btrfs_root *root);
 int write_ctree_super(struct btrfs_trans_handle *trans,
 		      struct btrfs_root *root);
@@ -124,6 +154,9 @@ int csum_tree_block_size(struct extent_buffer *buf, u16 csum_sectorsize,
 			 int verify);
 int verify_tree_block_csum_silent(struct extent_buffer *buf, u16 csum_size);
 int btrfs_read_buffer(struct extent_buffer *buf, u64 parent_transid);
+int write_tree_block(struct btrfs_trans_handle *trans,
+		     struct btrfs_root *root,
+		     struct extent_buffer *eb);
 int write_and_map_eb(struct btrfs_trans_handle *trans, struct btrfs_root *root,
 		     struct extent_buffer *eb);
 

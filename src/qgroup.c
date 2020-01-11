@@ -237,10 +237,16 @@ static void print_qgroup_column(struct btrfs_qgroup *qgroup,
 		print_qgroup_column_add_blank(BTRFS_QGROUP_PARENT, len);
 		break;
 	case BTRFS_QGROUP_MAX_RFER:
-		len = printf("%*s", max_len, pretty_size_mode(qgroup->max_rfer, unit_mode));
+		if (qgroup->flags & BTRFS_QGROUP_LIMIT_MAX_RFER)
+			len = printf("%*s", max_len, pretty_size_mode(qgroup->max_rfer, unit_mode));
+		else
+			len = printf("%*s", max_len, "none");
 		break;
 	case BTRFS_QGROUP_MAX_EXCL:
-		len = printf("%*s", max_len, pretty_size_mode(qgroup->max_excl, unit_mode));
+		if (qgroup->flags & BTRFS_QGROUP_LIMIT_MAX_EXCL)
+			len = printf("%*s", max_len, pretty_size_mode(qgroup->max_excl, unit_mode));
+		else
+			len = printf("%*s", max_len, "none");
 		break;
 	case BTRFS_QGROUP_CHILD:
 		len = print_child_column(qgroup);
@@ -266,7 +272,7 @@ static void print_single_qgroup_table(struct btrfs_qgroup *qgroup)
 	printf("\n");
 }
 
-static void print_table_head()
+static void print_table_head(void)
 {
 	int i;
 	int len;
@@ -430,13 +436,12 @@ struct btrfs_qgroup_comparer_set *btrfs_qgroup_alloc_comparer_set(void)
 	size = sizeof(struct btrfs_qgroup_comparer_set) +
 	       BTRFS_QGROUP_NCOMPS_INCREASE *
 	       sizeof(struct btrfs_qgroup_comparer);
-	set = malloc(size);
+	set = calloc(1, size);
 	if (!set) {
 		fprintf(stderr, "memory allocation failed\n");
 		exit(1);
 	}
 
-	memset(set, 0, size);
 	set->total = BTRFS_QGROUP_NCOMPS_INCREASE;
 
 	return set;
@@ -459,12 +464,16 @@ int btrfs_qgroup_setup_comparer(struct btrfs_qgroup_comparer_set  **comp_set,
 	BUG_ON(set->ncomps > set->total);
 
 	if (set->ncomps == set->total) {
+		void *tmp;
+
 		size = set->total + BTRFS_QGROUP_NCOMPS_INCREASE;
 		size = sizeof(*set) +
 		       size * sizeof(struct btrfs_qgroup_comparer);
+		tmp = set;
 		set = realloc(set, size);
 		if (!set) {
 			fprintf(stderr, "memory allocation failed\n");
+			free(tmp);
 			exit(1);
 		}
 
@@ -634,12 +643,11 @@ static int add_qgroup(struct qgroup_lookup *qgroup_lookup, u64 qgroupid,
 	if (!ret)
 		return 0;
 
-	bq = malloc(sizeof(*bq));
+	bq = calloc(1, sizeof(*bq));
 	if (!bq) {
 		printf("memory allocation failed\n");
 		exit(1);
 	}
-	memset(bq, 0, sizeof(*bq));
 	if (qgroupid) {
 		bq->qgroupid = qgroupid;
 		INIT_LIST_HEAD(&bq->qgroups);
@@ -803,12 +811,11 @@ struct btrfs_qgroup_filter_set *btrfs_qgroup_alloc_filter_set(void)
 	size = sizeof(struct btrfs_qgroup_filter_set) +
 	       BTRFS_QGROUP_NFILTERS_INCREASE *
 	       sizeof(struct btrfs_qgroup_filter);
-	set = malloc(size);
+	set = calloc(1, size);
 	if (!set) {
 		fprintf(stderr, "memory allocation failed\n");
 		exit(1);
 	}
-	memset(set, 0, size);
 	set->total = BTRFS_QGROUP_NFILTERS_INCREASE;
 
 	return set;
@@ -830,12 +837,16 @@ int btrfs_qgroup_setup_filter(struct btrfs_qgroup_filter_set **filter_set,
 	BUG_ON(set->nfilters > set->total);
 
 	if (set->nfilters == set->total) {
+		void *tmp;
+
 		size = set->total + BTRFS_QGROUP_NFILTERS_INCREASE;
 		size = sizeof(*set) + size * sizeof(struct btrfs_qgroup_filter);
 
+		tmp = set;
 		set = realloc(set, size);
 		if (!set) {
 			fprintf(stderr, "memory allocation failed\n");
+			free(tmp);
 			exit(1);
 		}
 		memset(&set->filters[set->total], 0,
@@ -1039,7 +1050,6 @@ static int __qgroups_search(int fd, struct qgroup_lookup *qgroup_lookup)
 	struct btrfs_ioctl_search_header *sh;
 	unsigned long off = 0;
 	unsigned int i;
-	int e;
 	struct btrfs_qgroup_info_item *info;
 	struct btrfs_qgroup_limit_item *limit;
 	struct btrfs_qgroup *bq;
@@ -1064,11 +1074,10 @@ static int __qgroups_search(int fd, struct qgroup_lookup *qgroup_lookup)
 
 	while (1) {
 		ret = ioctl(fd, BTRFS_IOC_TREE_SEARCH, &args);
-		e = errno;
 		if (ret < 0) {
 			fprintf(stderr,
 				"ERROR: can't perform the search - %s\n",
-				strerror(e));
+				strerror(errno));
 			return ret;
 		}
 		/* the ioctl returns the number of item it found in nr_items */
@@ -1106,7 +1115,8 @@ static int __qgroups_search(int fd, struct qgroup_lookup *qgroup_lookup)
 				  btrfs_stack_qgroup_info_exclusive_compressed
 				  (info);
 				add_qgroup(qgroup_lookup, sh->offset, a1, a2,
-					   a3, a4, a5, 0, 0, 0, 0, 0, 0, 0);
+					   a3, a4, a5, 0, 0, 0, 0, 0,
+					   NULL, NULL);
 			} else if (sh->type == BTRFS_QGROUP_LIMIT_KEY) {
 				limit = (struct btrfs_qgroup_limit_item *)
 				    (args.buf + off);
@@ -1121,7 +1131,8 @@ static int __qgroups_search(int fd, struct qgroup_lookup *qgroup_lookup)
 				a5 = btrfs_stack_qgroup_limit_rsv_exclusive
 				     (limit);
 				add_qgroup(qgroup_lookup, sh->offset, 0, 0,
-					   0, 0, 0, a1, a2, a3, a4, a5, 0, 0);
+					   0, 0, 0, a1, a2, a3, a4, a5,
+					   NULL, NULL);
 			} else if (sh->type == BTRFS_QGROUP_RELATION_KEY) {
 				if (sh->offset < sh->objectid)
 					goto skip;
@@ -1197,6 +1208,7 @@ int btrfs_show_qgroups(int fd,
 
 	__free_all_qgroups(&qgroup_lookup);
 	btrfs_qgroup_free_filter_set(filter_set);
+	btrfs_qgroup_free_comparer_set(comp_set);
 	return ret;
 }
 

@@ -63,11 +63,6 @@ struct root_stats {
 	int total_levels;
 };
 
-struct fs_root {
-	struct btrfs_key key;
-	struct btrfs_key *snaps;
-};
-
 static int add_seek(struct rb_root *root, u64 dist)
 {
 	struct rb_node **p = &root->rb_node;
@@ -218,9 +213,9 @@ static void print_seek_histogram(struct root_stats *stat)
 	struct rb_node *n = rb_first(&stat->seek_root);
 	struct seek *seek;
 	u64 tick_interval;
-	u64 group_start;
+	u64 group_start = 0;
 	u64 group_count = 0;
-	u64 group_end;
+	u64 group_end = 0;
 	u64 i;
 	u64 max_seek = stat->max_seek_len;
 	int digits = 1;
@@ -372,8 +367,8 @@ out_print:
 		printf("\tTotal seeks: %Lu\n", stat.total_seeks);
 		printf("\t\tForward seeks: %Lu\n", stat.forward_seeks);
 		printf("\t\tBackward seeks: %Lu\n", stat.backward_seeks);
-		printf("\t\tAvg seek len: %Lu\n", stat.total_seek_len /
-		       stat.total_seeks);
+		printf("\t\tAvg seek len: %llu\n", stat.total_seeks ?
+			stat.total_seek_len / stat.total_seeks : 0);
 		print_seek_histogram(&stat);
 		printf("\tTotal clusters: %Lu\n", stat.total_clusters);
 		printf("\t\tAvg cluster size: %Lu\n", stat.total_cluster_size /
@@ -417,11 +412,18 @@ out:
 		free(seek);
 	}
 
-	btrfs_free_path(path);
+	/*
+	 * We only use path to save node data in iterating,
+	 * without holding eb's ref_cnt in path.
+	 * Don't use btrfs_free_path() here, it will free these
+	 * eb again, and cause many problems, as negative ref_cnt
+	 * or invalid memory access.
+	 */
+	free(path);
 	return ret;
 }
 
-static void usage()
+static void usage(void)
 {
 	fprintf(stderr, "Usage: calc-size [-v] [-b] <device>\n");
 }
@@ -429,9 +431,7 @@ static void usage()
 int main(int argc, char **argv)
 {
 	struct btrfs_key key;
-	struct fs_root *roots;
 	struct btrfs_root *root;
-	size_t fs_roots_size = sizeof(struct fs_root);
 	int opt;
 	int ret = 0;
 
@@ -475,12 +475,6 @@ int main(int argc, char **argv)
 		exit(1);
 	}
 
-	roots = malloc(fs_roots_size);
-	if (!roots) {
-		fprintf(stderr, "No memory\n");
-		goto out;
-	}
-
 	printf("Calculating size of root tree\n");
 	key.objectid = BTRFS_ROOT_TREE_OBJECTID;
 	ret = calc_root_size(root, &key, 0);
@@ -499,14 +493,14 @@ int main(int argc, char **argv)
 	if (ret)
 		goto out;
 
-	roots[0].key.objectid = BTRFS_FS_TREE_OBJECTID;
-	roots[0].key.offset = (u64)-1;
+	key.objectid = BTRFS_FS_TREE_OBJECTID;
+	key.offset = (u64)-1;
 	printf("Calculatin' size of fs tree\n");
-	ret = calc_root_size(root, &roots[0].key, 1);
+	ret = calc_root_size(root, &key, 1);
 	if (ret)
 		goto out;
 out:
 	close_ctree(root);
-	free(roots);
+	btrfs_close_all_devices();
 	return ret;
 }

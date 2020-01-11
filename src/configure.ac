@@ -23,7 +23,7 @@ dnl the compiler (like AC_PROG_LIBTOOL) to avoid autoconf errors.
 AC_USE_SYSTEM_EXTENSIONS
 
 AC_CONFIG_SRCDIR([btrfs.c])
-AC_PREFIX_DEFAULT([/usr])
+AC_PREFIX_DEFAULT([/usr/local])
 
 AC_PROG_CC
 AC_CANONICAL_HOST
@@ -35,7 +35,7 @@ AC_SYS_LARGEFILE
 
 AC_PROG_INSTALL
 AC_PROG_LN_S
-AC_PATH_PROG([AR], [ar])
+AC_CHECK_TOOL([AR], [ar])
 AC_PATH_PROG([RM], [rm], [rm])
 AC_PATH_PROG([RMDIR], [rmdir], [rmdir])
 
@@ -165,7 +165,7 @@ AC_MSG_RESULT([
 	cflags:            ${CFLAGS}
 	ldflags:           ${LDFLAGS}
 
-	documentaton:      ${enable_documentation}
+	documentation:     ${enable_documentation}
 	backtrace support: ${enable_backtrace}
 	btrfs-convert:     ${enable_convert}
 

@@ -46,9 +46,14 @@ static int add_eb_to_result(struct extent_buffer *eb,
 	    generation < filter->generation)
 		return ret;
 
-	/* Get the generation cache or create one */
+	/*
+	 * Get the generation cache or create one
+	 *
+	 * NOTE: search_cache_extent() may return cache that doesn't cover
+	 * the range. So we need an extra check to make sure it's the right one.
+	 */
 	cache = search_cache_extent(result, generation);
-	if (!cache) {
+	if (!cache || cache->start != generation) {
 		gen_cache = malloc(sizeof(*gen_cache));
 		BUG_ON(!gen_cache);
 		cache = &gen_cache->cache;
@@ -96,34 +101,40 @@ static int add_eb_to_result(struct extent_buffer *eb,
  * Return 1 if found root with given gen/level and set *match to it.
  * Return <0 if error happens
  */
-int btrfs_find_root_search(struct btrfs_root *chunk_root,
+int btrfs_find_root_search(struct btrfs_fs_info *fs_info,
 			   struct btrfs_find_root_filter *filter,
 			   struct cache_tree *result,
 			   struct cache_extent **match)
 {
-	struct btrfs_fs_info *fs_info = chunk_root->fs_info;
 	struct extent_buffer *eb;
-	u64 metadata_offset = 0;
-	u64 metadata_size = 0;
+	u64 chunk_offset = 0;
+	u64 chunk_size = 0;
 	u64 offset = 0;
-	u32 leafsize = chunk_root->leafsize;
+	u32 leafsize = btrfs_super_leafsize(fs_info->super_copy);
 	int suppress_errors = 0;
 	int ret = 0;
 
 	suppress_errors = fs_info->suppress_check_block_errors;
 	fs_info->suppress_check_block_errors = 1;
 	while (1) {
-		ret = btrfs_next_metadata(&fs_info->mapping_tree,
-					  &metadata_offset, &metadata_size);
+		if (filter->objectid != BTRFS_CHUNK_TREE_OBJECTID)
+			ret = btrfs_next_bg_metadata(&fs_info->mapping_tree,
+						  &chunk_offset,
+						  &chunk_size);
+		else
+			ret = btrfs_next_bg_system(&fs_info->mapping_tree,
+						&chunk_offset,
+						&chunk_size);
 		if (ret) {
 			if (ret == -ENOENT)
 				ret = 0;
 			break;
 		}
-		for (offset = metadata_offset;
-		     offset < metadata_offset + metadata_size;
-		     offset += chunk_root->leafsize) {
-			eb = read_tree_block(chunk_root, offset, leafsize, 0);
+		for (offset = chunk_offset;
+		     offset < chunk_offset + chunk_size;
+		     offset += leafsize) {
+			eb = read_tree_block_fs_info(fs_info, offset, leafsize,
+						     0);
 			if (!eb || IS_ERR(eb))
 				continue;
 			ret = add_eb_to_result(eb, result, leafsize, filter,

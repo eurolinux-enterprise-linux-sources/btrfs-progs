@@ -48,6 +48,7 @@ static void print_usage(void)
 	fprintf(stderr, "\t-a : print information of all superblocks\n");
 	fprintf(stderr, "\t-i <super_mirror> : specify which mirror to print out\n");
 	fprintf(stderr, "\t-F : attempt to dump superblocks with bad magic\n");
+	fprintf(stderr, "\t-s <bytenr> : specify alternate superblock offset\n");
 	fprintf(stderr, "%s\n", PACKAGE_STRING);
 }
 
@@ -63,7 +64,7 @@ int main(int argc, char **argv)
 	u64 arg;
 	u64 sb_bytenr = btrfs_sb_offset(0);
 
-	while ((opt = getopt(argc, argv, "fFai:")) != -1) {
+	while ((opt = getopt(argc, argv, "fFai:s:")) != -1) {
 		switch (opt) {
 		case 'i':
 			arg = arg_strtou64(optarg);
@@ -85,6 +86,10 @@ int main(int argc, char **argv)
 			break;
 		case 'F':
 			force = 1;
+			break;
+		case 's':
+			sb_bytenr = arg_strtou64(optarg);
+			all = 0;
 			break;
 		default:
 			print_usage();
@@ -139,17 +144,15 @@ static int load_and_dump_sb(char *filename, int fd, u64 sb_bytenr, int full,
 
 	ret = pread64(fd, super_block_data, BTRFS_SUPER_INFO_SIZE, sb_bytenr);
 	if (ret != BTRFS_SUPER_INFO_SIZE) {
-		int e = errno;
-
 		/* check if the disk if too short for further superblock */
-		if (ret == 0 && e == 0)
+		if (ret == 0 && errno == 0)
 			return 0;
 
 		fprintf(stderr,
 		   "ERROR: Failed to read the superblock on %s at %llu\n",
 		   filename, (unsigned long long)sb_bytenr);
 		fprintf(stderr,
-		   "ERROR: error = '%s', errno = %d\n", strerror(e), e);
+		   "ERROR: error = '%s', errno = %d\n", strerror(errno), errno);
 		return 1;
 	}
 	printf("superblock: bytenr=%llu, device=%s\n", sb_bytenr, filename);
@@ -181,11 +184,14 @@ static void print_sys_chunk_array(struct btrfs_super_block *sb)
 	struct extent_buffer *buf;
 	struct btrfs_disk_key *disk_key;
 	struct btrfs_chunk *chunk;
-	struct btrfs_key key;
-	u8 *ptr, *array_end;
+	u8 *array_ptr;
+	unsigned long sb_array_offset;
 	u32 num_stripes;
+	u32 array_size;
 	u32 len = 0;
-	int i = 0;
+	u32 cur_offset;
+	struct btrfs_key key;
+	int item;
 
 	buf = malloc(sizeof(*buf) + sizeof(*sb));
 	if (!buf) {
@@ -193,33 +199,69 @@ static void print_sys_chunk_array(struct btrfs_super_block *sb)
 		exit(1);
 	}
 	write_extent_buffer(buf, sb, 0, sizeof(*sb));
-	ptr = sb->sys_chunk_array;
-	array_end = ptr + btrfs_super_sys_array_size(sb);
+	array_size = btrfs_super_sys_array_size(sb);
 
-	while (ptr < array_end) {
-		disk_key = (struct btrfs_disk_key *)ptr;
+	array_ptr = sb->sys_chunk_array;
+	sb_array_offset = offsetof(struct btrfs_super_block, sys_chunk_array);
+	cur_offset = 0;
+	item = 0;
+
+	while (cur_offset < array_size) {
+		disk_key = (struct btrfs_disk_key *)array_ptr;
+		len = sizeof(*disk_key);
+		if (cur_offset + len > array_size)
+			goto out_short_read;
+
 		btrfs_disk_key_to_cpu(&key, disk_key);
 
-		printf("\titem %d ", i);
-		btrfs_print_key(disk_key);
+		array_ptr += len;
+		sb_array_offset += len;
+		cur_offset += len;
 
-		len = sizeof(*disk_key);
+		printf("\titem %d ", item);
+		btrfs_print_key(disk_key);
 		putchar('\n');
-		ptr += len;
 
 		if (key.type == BTRFS_CHUNK_ITEM_KEY) {
-			chunk = (struct btrfs_chunk *)(ptr - (u8 *)sb);
+			chunk = (struct btrfs_chunk *)sb_array_offset;
+			/*
+			 * At least one btrfs_chunk with one stripe must be
+			 * present, exact stripe count check comes afterwards
+			 */
+			len = btrfs_chunk_item_size(1);
+			if (cur_offset + len > array_size)
+				goto out_short_read;
+
 			print_chunk(buf, chunk);
 			num_stripes = btrfs_chunk_num_stripes(buf, chunk);
+			if (!num_stripes) {
+				printk(
+	    "ERROR: invalid number of stripes %u in sys_array at offset %u\n",
+					num_stripes, cur_offset);
+				break;
+			}
 			len = btrfs_chunk_item_size(num_stripes);
+			if (cur_offset + len > array_size)
+				goto out_short_read;
 		} else {
-			BUG();
+			printk(
+		"ERROR: unexpected item type %u in sys_array at offset %u\n",
+				(u32)key.type, cur_offset);
+ 			break;
 		}
+		array_ptr += len;
+		sb_array_offset += len;
+		cur_offset += len;
 
-		ptr += len;
-		i++;
+		item++;
 	}
 
+	free(buf);
+	return;
+
+out_short_read:
+	printk("ERROR: sys_array too short to read %u bytes at offset %u\n",
+			len, cur_offset);
 	free(buf);
 }
 
@@ -290,7 +332,7 @@ struct readable_flag_entry {
 #define DEF_INCOMPAT_FLAG_ENTRY(bit_name)		\
 	{BTRFS_FEATURE_INCOMPAT_##bit_name, #bit_name}
 
-struct readable_flag_entry incompat_flags_array[] = {
+static struct readable_flag_entry incompat_flags_array[] = {
 	DEF_INCOMPAT_FLAG_ENTRY(MIXED_BACKREF),
 	DEF_INCOMPAT_FLAG_ENTRY(DEFAULT_SUBVOL),
 	DEF_INCOMPAT_FLAG_ENTRY(MIXED_GROUPS),
@@ -305,7 +347,30 @@ struct readable_flag_entry incompat_flags_array[] = {
 static const int incompat_flags_num = sizeof(incompat_flags_array) /
 				      sizeof(struct readable_flag_entry);
 
-static void print_readable_incompat_flag(u64 flag)
+#define DEF_HEADER_FLAG_ENTRY(bit_name)			\
+	{BTRFS_HEADER_FLAG_##bit_name, #bit_name}
+#define DEF_SUPER_FLAG_ENTRY(bit_name)			\
+	{BTRFS_SUPER_FLAG_##bit_name, #bit_name}
+
+static struct readable_flag_entry super_flags_array[] = {
+	DEF_HEADER_FLAG_ENTRY(WRITTEN),
+	DEF_HEADER_FLAG_ENTRY(RELOC),
+	DEF_SUPER_FLAG_ENTRY(CHANGING_FSID),
+	DEF_SUPER_FLAG_ENTRY(SEEDING),
+	DEF_SUPER_FLAG_ENTRY(METADUMP),
+	DEF_SUPER_FLAG_ENTRY(METADUMP_V2)
+};
+static const int super_flags_num = ARRAY_SIZE(super_flags_array);
+
+#define BTRFS_SUPER_FLAG_SUPP	(BTRFS_HEADER_FLAG_WRITTEN |\
+				 BTRFS_HEADER_FLAG_RELOC |\
+				 BTRFS_SUPER_FLAG_CHANGING_FSID |\
+				 BTRFS_SUPER_FLAG_SEEDING |\
+				 BTRFS_SUPER_FLAG_METADUMP |\
+				 BTRFS_SUPER_FLAG_METADUMP_V2)
+
+static void __print_readable_flag(u64 flag, struct readable_flag_entry *array,
+				  int array_size, u64 supported_flags)
 {
 	int i;
 	int first = 1;
@@ -313,9 +378,10 @@ static void print_readable_incompat_flag(u64 flag)
 
 	if (!flag)
 		return;
+
 	printf("\t\t\t( ");
-	for (i = 0; i < incompat_flags_num; i++) {
-		entry = incompat_flags_array + i;
+	for (i = 0; i < array_size; i++) {
+		entry = array + i;
 		if (flag & entry->bit) {
 			if (first)
 				printf("%s ", entry->output);
@@ -324,7 +390,7 @@ static void print_readable_incompat_flag(u64 flag)
 			first = 0;
 		}
 	}
-	flag &= ~BTRFS_FEATURE_INCOMPAT_SUPP;
+	flag &= ~supported_flags;
 	if (flag) {
 		if (first)
 			printf("unknown flag: 0x%llx ", flag);
@@ -332,6 +398,19 @@ static void print_readable_incompat_flag(u64 flag)
 			printf("|\n\t\t\t  unknown flag: 0x%llx ", flag);
 	}
 	printf(")\n");
+}
+
+static void print_readable_incompat_flag(u64 flag)
+{
+	return __print_readable_flag(flag, incompat_flags_array,
+				     incompat_flags_num,
+				     BTRFS_FEATURE_INCOMPAT_SUPP);
+}
+
+static void print_readable_super_flag(u64 flag)
+{
+	return __print_readable_flag(flag, super_flags_array,
+				     super_flags_num, BTRFS_SUPER_FLAG_SUPP);
 }
 
 static void dump_superblock(struct btrfs_super_block *sb, int full)
@@ -353,6 +432,7 @@ static void dump_superblock(struct btrfs_super_block *sb, int full)
 		(unsigned long long)btrfs_super_bytenr(sb));
 	printf("flags\t\t\t0x%llx\n",
 		(unsigned long long)btrfs_super_flags(sb));
+	print_readable_super_flag(btrfs_super_flags(sb));
 
 	printf("magic\t\t\t");
 	s = (char *) &sb->magic;

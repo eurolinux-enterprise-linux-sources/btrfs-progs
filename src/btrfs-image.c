@@ -25,6 +25,8 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <zlib.h>
+#include <getopt.h>
+
 #include "kerncompat.h"
 #include "crc32c.h"
 #include "ctree.h"
@@ -148,7 +150,6 @@ struct mdrestore_struct {
 	struct btrfs_fs_info *info;
 };
 
-static void print_usage(void) __attribute__((noreturn));
 static int search_for_chunk_blocks(struct mdrestore_struct *mdres,
 				   u64 search, u64 cluster_bytenr);
 static struct extent_buffer *alloc_dummy_eb(u64 bytenr, u32 size);
@@ -732,38 +733,32 @@ static int metadump_init(struct metadump_struct *md, struct btrfs_root *root,
 	int i, ret = 0;
 
 	memset(md, 0, sizeof(*md));
-	pthread_cond_init(&md->cond, NULL);
-	pthread_mutex_init(&md->mutex, NULL);
+	md->cluster = calloc(1, BLOCK_SIZE);
+	if (!md->cluster)
+		return -ENOMEM;
+	md->threads = calloc(num_threads, sizeof(pthread_t));
+	if (!md->threads) {
+		free(md->cluster);
+		return -ENOMEM;
+	}
 	INIT_LIST_HEAD(&md->list);
 	INIT_LIST_HEAD(&md->ordered);
 	md->root = root;
 	md->out = out;
 	md->pending_start = (u64)-1;
 	md->compress_level = compress_level;
-	md->cluster = calloc(1, BLOCK_SIZE);
 	md->sanitize_names = sanitize_names;
 	if (sanitize_names > 1)
 		crc32c_optimization_init();
 
-	if (!md->cluster) {
-		pthread_cond_destroy(&md->cond);
-		pthread_mutex_destroy(&md->mutex);
-		return -ENOMEM;
-	}
-
-	meta_cluster_init(md, 0);
-	if (!num_threads)
-		return 0;
-
 	md->name_tree.rb_node = NULL;
 	md->num_threads = num_threads;
-	md->threads = calloc(num_threads, sizeof(pthread_t));
-	if (!md->threads) {
-		free(md->cluster);
-		pthread_cond_destroy(&md->cond);
-		pthread_mutex_destroy(&md->mutex);
-		return -ENOMEM;
-	}
+	pthread_cond_init(&md->cond, NULL);
+	pthread_mutex_init(&md->mutex, NULL);
+	meta_cluster_init(md, 0);
+
+	if (!num_threads)
+		return 0;
 
 	for (i = 0; i < num_threads; i++) {
 		ret = pthread_create(md->threads + i, NULL, dump_worker, md);
@@ -871,54 +866,34 @@ out:
 static int read_data_extent(struct metadump_struct *md,
 			    struct async_work *async)
 {
-	struct btrfs_multi_bio *multi = NULL;
-	struct btrfs_device *device;
+	struct btrfs_root *root = md->root;
 	u64 bytes_left = async->size;
 	u64 logical = async->start;
 	u64 offset = 0;
-	u64 bytenr;
 	u64 read_len;
-	ssize_t done;
-	int fd;
+	int num_copies;
+	int cur_mirror;
 	int ret;
 
-	while (bytes_left) {
-		read_len = bytes_left;
-		ret = btrfs_map_block(&md->root->fs_info->mapping_tree, READ,
-				      logical, &read_len, &multi, 0, NULL);
-		if (ret) {
-			fprintf(stderr, "Couldn't map data block %d\n", ret);
-			return ret;
+	num_copies = btrfs_num_copies(&root->fs_info->mapping_tree, logical,
+				      bytes_left);
+
+	/* Try our best to read data, just like read_tree_block() */
+	for (cur_mirror = 0; cur_mirror < num_copies; cur_mirror++) {
+		while (bytes_left) {
+			read_len = bytes_left;
+			ret = read_extent_data(root,
+					(char *)(async->buffer + offset),
+					logical, &read_len, cur_mirror);
+			if (ret < 0)
+				break;
+			offset += read_len;
+			logical += read_len;
+			bytes_left -= read_len;
 		}
-
-		device = multi->stripes[0].dev;
-
-		if (device->fd == 0) {
-			fprintf(stderr,
-				"Device we need to read from is not open\n");
-			free(multi);
-			return -EIO;
-		}
-		fd = device->fd;
-		bytenr = multi->stripes[0].physical;
-		free(multi);
-
-		read_len = min(read_len, bytes_left);
-		done = pread64(fd, async->buffer+offset, read_len, bytenr);
-		if (done < read_len) {
-			if (done < 0)
-				fprintf(stderr, "Error reading extent %d\n",
-					errno);
-			else
-				fprintf(stderr, "Short read\n");
-			return -EIO;
-		}
-
-		bytes_left -= done;
-		offset += done;
-		logical += done;
 	}
-
+	if (bytes_left)
+		return -EIO;
 	return 0;
 }
 
@@ -1489,8 +1464,7 @@ static int update_super(struct mdrestore_struct *mdres, u8 *buffer)
 			btrfs_set_stack_chunk_sub_stripes(chunk, 0);
 			btrfs_set_stack_chunk_type(chunk,
 						   BTRFS_BLOCK_GROUP_SYSTEM);
-			btrfs_set_stack_stripe_devid(&chunk->stripe,
-						     super->dev_item.devid);
+			chunk->stripe.devid = super->dev_item.devid;
 			physical = logical_to_physical(mdres, key.offset,
 						       &size);
 			if (size != (u64)-1)
@@ -1524,10 +1498,9 @@ static struct extent_buffer *alloc_dummy_eb(u64 bytenr, u32 size)
 {
 	struct extent_buffer *eb;
 
-	eb = malloc(sizeof(struct extent_buffer) + size);
+	eb = calloc(1, sizeof(struct extent_buffer) + size);
 	if (!eb)
 		return NULL;
-	memset(eb, 0, sizeof(struct extent_buffer) + size);
 
 	eb->start = bytenr;
 	eb->len = size;
@@ -2607,8 +2580,8 @@ static int update_disk_super_on_device(struct btrfs_fs_info *info,
 	char fs_uuid[BTRFS_UUID_SIZE];
 	u64 devid, type, io_align, io_width;
 	u64 sector_size, total_bytes, bytes_used;
-	char *buf;
-	int fp;
+	char buf[BTRFS_SUPER_INFO_SIZE];
+	int fp = -1;
 	int ret;
 
 	key.objectid = BTRFS_DEV_ITEMS_OBJECTID;
@@ -2618,8 +2591,9 @@ static int update_disk_super_on_device(struct btrfs_fs_info *info,
 	btrfs_init_path(&path);
 	ret = btrfs_search_slot(NULL, info->chunk_root, &key, &path, 0, 0); 
 	if (ret) {
-		fprintf(stderr, "search key fails\n");
-		exit(1);
+		fprintf(stderr, "ERROR: search key failed\n");
+		ret = -EIO;
+		goto out;
 	}
 
 	leaf = path.nodes[0];
@@ -2628,8 +2602,9 @@ static int update_disk_super_on_device(struct btrfs_fs_info *info,
 
 	devid = btrfs_device_id(leaf, dev_item);
 	if (devid != cur_devid) {
-		printk("devid %llu mismatch with %llu\n", devid, cur_devid);
-		exit(1);
+		printk("ERROR: devid %llu mismatch with %llu\n", devid, cur_devid);
+		ret = -EIO;
+		goto out;
 	}
 
 	type = btrfs_device_type(leaf, dev_item);
@@ -2648,15 +2623,9 @@ static int update_disk_super_on_device(struct btrfs_fs_info *info,
 	/* update other devices' super block */
 	fp = open(other_dev, O_CREAT | O_RDWR, 0600);
 	if (fp < 0) {
-		fprintf(stderr, "could not open %s\n", other_dev);
-		exit(1);
-	}
-
-	buf = malloc(BTRFS_SUPER_INFO_SIZE);
-	if (!buf) {
-		ret = -ENOMEM;
-		close(fp);
-		return ret;
+		fprintf(stderr, "ERROR: could not open %s\n", other_dev);
+		ret = -EIO;
+		goto out;
 	}
 
 	memcpy(buf, info->super_copy, BTRFS_SUPER_INFO_SIZE);
@@ -2677,6 +2646,10 @@ static int update_disk_super_on_device(struct btrfs_fs_info *info,
 
 	ret = pwrite64(fp, buf, BTRFS_SUPER_INFO_SIZE, BTRFS_SUPER_INFO_OFFSET);
 	if (ret != BTRFS_SUPER_INFO_SIZE) {
+		if (ret < 0)
+			fprintf(stderr, "ERROR: cannot write superblock: %s\n", strerror(ret));
+		else
+			fprintf(stderr, "ERROR: cannot write superblock\n");
 		ret = -EIO;
 		goto out;
 	}
@@ -2684,12 +2657,12 @@ static int update_disk_super_on_device(struct btrfs_fs_info *info,
 	write_backup_supers(fp, (u8 *)buf);
 
 out:
-	free(buf);
-	close(fp);
-	return 0;
+	if (fp != -1)
+		close(fp);
+	return ret;
 }
 
-static void print_usage(void)
+static void print_usage(int ret)
 {
 	fprintf(stderr, "usage: btrfs-image [options] source target\n");
 	fprintf(stderr, "\t-r      \trestore metadump image\n");
@@ -2702,14 +2675,14 @@ static void print_usage(void)
 	fprintf(stderr, "\n");
 	fprintf(stderr, "\tIn the dump mode, source is the btrfs device and target is the output file (use '-' for stdout).\n");
 	fprintf(stderr, "\tIn the restore mode, source is the dumped image and target is the btrfs device/file.\n");
-	exit(1);
+	exit(ret);
 }
 
 int main(int argc, char *argv[])
 {
 	char *source;
 	char *target;
-	u64 num_threads = 1;
+	u64 num_threads = 0;
 	u64 compress_level = 0;
 	int create = 1;
 	int old_restore = 0;
@@ -2722,7 +2695,11 @@ int main(int argc, char *argv[])
 	FILE *out;
 
 	while (1) {
-		int c = getopt(argc, argv, "rc:t:oswm");
+		static const struct option long_options[] = {
+			{ "help", no_argument, NULL, GETOPT_VAL_HELP},
+			{ NULL, 0, NULL, 0 }
+		};
+		int c = getopt_long(argc, argv, "rc:t:oswm", long_options, NULL);
 		if (c < 0)
 			break;
 		switch (c) {
@@ -2732,12 +2709,12 @@ int main(int argc, char *argv[])
 		case 't':
 			num_threads = arg_strtou64(optarg);
 			if (num_threads > 32)
-				print_usage();
+				print_usage(1);
 			break;
 		case 'c':
 			compress_level = arg_strtou64(optarg);
 			if (compress_level > 9)
-				print_usage();
+				print_usage(1);
 			break;
 		case 'o':
 			old_restore = 1;
@@ -2752,15 +2729,16 @@ int main(int argc, char *argv[])
 			create = 0;
 			multi_devices = 1;
 			break;
+			case GETOPT_VAL_HELP:
 		default:
-			print_usage();
+			print_usage(c != GETOPT_VAL_HELP);
 		}
 	}
 
 	argc = argc - optind;
 	set_argv0(argv);
 	if (check_argc_min(argc, 2))
-		print_usage();
+		print_usage(1);
 
 	dev_cnt = argc - 1;
 
@@ -2785,7 +2763,7 @@ int main(int argc, char *argv[])
 	}
 
 	if (usage_error)
-		print_usage();
+		print_usage(1);
 
 	source = argv[optind];
 	target = argv[optind + 1];
@@ -2800,10 +2778,16 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	if (num_threads == 1 && compress_level > 0) {
-		num_threads = sysconf(_SC_NPROCESSORS_ONLN);
-		if (num_threads <= 0)
-			num_threads = 1;
+	if (compress_level > 0 || create == 0) {
+		if (num_threads == 0) {
+			long tmp = sysconf(_SC_NPROCESSORS_ONLN);
+
+			if (tmp <= 0)
+				tmp = 1;
+			num_threads = tmp;
+		}
+	} else {
+		num_threads = 0;
 	}
 
 	if (create) {
@@ -2838,9 +2822,8 @@ int main(int argc, char *argv[])
 					  OPEN_CTREE_PARTIAL |
 					  OPEN_CTREE_RESTORE);
 		if (!info) {
-			int e = errno;
 			fprintf(stderr, "unable to open %s error = %s\n",
-				target, strerror(e));
+				target, strerror(errno));
 			return 1;
 		}
 
@@ -2890,6 +2873,8 @@ out:
 					strerror(errno));
 		}
 	}
+
+	btrfs_close_all_devices();
 
 	return !!ret;
 }

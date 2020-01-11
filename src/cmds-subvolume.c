@@ -21,10 +21,12 @@
 #include <sys/ioctl.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <sys/vfs.h>
 #include <libgen.h>
 #include <limits.h>
 #include <getopt.h>
 #include <uuid/uuid.h>
+#include <linux/magic.h>
 
 #include "kerncompat.h"
 #include "ioctl.h"
@@ -35,6 +37,67 @@
 #include "utils.h"
 #include "btrfs-list.h"
 #include "utils.h"
+
+static int is_subvolume_cleaned(int fd, u64 subvolid)
+{
+	int ret;
+	struct btrfs_ioctl_search_args args;
+	struct btrfs_ioctl_search_key *sk = &args.key;
+
+	sk->tree_id = BTRFS_ROOT_TREE_OBJECTID;
+	sk->min_objectid = subvolid;
+	sk->max_objectid = subvolid;
+	sk->min_type = BTRFS_ROOT_ITEM_KEY;
+	sk->max_type = BTRFS_ROOT_ITEM_KEY;
+	sk->min_offset = 0;
+	sk->max_offset = (u64)-1;
+	sk->min_transid = 0;
+	sk->max_transid = (u64)-1;
+	sk->nr_items = 1;
+
+	ret = ioctl(fd, BTRFS_IOC_TREE_SEARCH, &args);
+	if (ret < 0)
+		return -errno;
+
+	if (sk->nr_items == 0)
+		return 1;
+
+	return 0;
+}
+
+static int wait_for_subvolume_cleaning(int fd, int count, u64 *ids,
+		int sleep_interval)
+{
+	int ret;
+	int i;
+
+	while (1) {
+		int clean = 1;
+
+		for (i = 0; i < count; i++) {
+			if (!ids[i])
+				continue;
+			ret = is_subvolume_cleaned(fd, ids[i]);
+			if (ret < 0) {
+				error(
+			    "cannot read status of dead subvolume %llu: %s",
+					(unsigned long long)ids[i], strerror(-ret));
+				return ret;
+			}
+			if (ret) {
+				printf("Subvolume id %llu is gone\n", ids[i]);
+				ids[i] = 0;
+			} else {
+				clean = 0;
+			}
+		}
+		if (clean)
+			break;
+		sleep(sleep_interval);
+	}
+
+	return 0;
+}
 
 static const char * const subvolume_cmd_group_usage[] = {
 	"btrfs subvolume <command> <args>",
@@ -97,8 +160,12 @@ static int cmd_subvol_create(int argc, char **argv)
 
 	retval = 1;	/* failure */
 	res = test_isdir(dst);
+	if (res < 0 && res != -ENOENT) {
+		error("cannot access %s: %s", dst, strerror(-res));
+		goto out;
+	}
 	if (res >= 0) {
-		fprintf(stderr, "ERROR: '%s' exists\n", dst);
+		error("target path already exists: %s", dst);
 		goto out;
 	}
 
@@ -108,23 +175,19 @@ static int cmd_subvol_create(int argc, char **argv)
 	dstdir = dirname(dupdir);
 
 	if (!test_issubvolname(newname)) {
-		fprintf(stderr, "ERROR: incorrect subvolume name '%s'\n",
-			newname);
+		error("invalid subvolume name: %s", newname);
 		goto out;
 	}
 
 	len = strlen(newname);
 	if (len == 0 || len >= BTRFS_VOL_NAME_MAX) {
-		fprintf(stderr, "ERROR: subvolume name too long '%s'\n",
-			newname);
+		error("subvolume name too long: %s", newname);
 		goto out;
 	}
 
-	fddst = open_file_or_dir(dstdir, &dirstream);
-	if (fddst < 0) {
-		fprintf(stderr, "ERROR: can't access '%s'\n", dstdir);
+	fddst = btrfs_open_dir(dstdir, &dirstream, 1);
+	if (fddst < 0)
 		goto out;
-	}
 
 	printf("Create subvolume '%s/%s'\n", dstdir, newname);
 	if (inherit) {
@@ -147,8 +210,7 @@ static int cmd_subvol_create(int argc, char **argv)
 	}
 
 	if (res < 0) {
-		fprintf(stderr, "ERROR: cannot create subvolume - %s\n",
-			strerror(errno));
+		error("cannot create subvolume: %s", strerror(errno));
 		goto out;
 	}
 
@@ -163,22 +225,30 @@ out:
 }
 
 /*
- * test if path is a subvolume:
- * this function return
- * 0-> path exists but it is not a subvolume
- * 1-> path exists and it is  a subvolume
- * -1 -> path is unaccessible
+ * Test if path is a subvolume
+ * Returns:
+ *   0 - path exists but it is not a subvolume
+ *   1 - path exists and it is  a subvolume
+ * < 0 - error
  */
-int test_issubvolume(char *path)
+int test_issubvolume(const char *path)
 {
 	struct stat	st;
+	struct statfs stfs;
 	int		res;
 
 	res = stat(path, &st);
-	if(res < 0 )
-		return -1;
+	if (res < 0)
+		return -errno;
 
-	return (st.st_ino == 256) && S_ISDIR(st.st_mode);
+	if (st.st_ino != BTRFS_FIRST_FREE_OBJECTID || !S_ISDIR(st.st_mode))
+		return 0;
+
+	res = statfs(path, &stfs);
+	if (res < 0)
+		return -errno;
+
+	return (int)stfs.f_type == BTRFS_SUPER_MAGIC;
 }
 
 static int wait_for_commit(int fd)
@@ -208,7 +278,7 @@ static const char * const cmd_subvol_delete_usage[] = {
 
 static int cmd_subvol_delete(int argc, char **argv)
 {
-	int	res, e, ret = 0;
+	int res, ret = 0;
 	int cnt;
 	int fd = -1;
 	struct btrfs_ioctl_vol_args	args;
@@ -264,12 +334,12 @@ again:
 
 	res = test_issubvolume(path);
 	if (res < 0) {
-		fprintf(stderr, "ERROR: error accessing '%s'\n", path);
+		error("cannot access subvolume %s: %s", path, strerror(-res));
 		ret = 1;
 		goto out;
 	}
 	if (!res) {
-		fprintf(stderr, "ERROR: '%s' is not a subvolume\n", path);
+		error("not a subvolume: %s", path);
 		ret = 1;
 		goto out;
 	}
@@ -277,7 +347,7 @@ again:
 	cpath = realpath(path, NULL);
 	if (!cpath) {
 		ret = errno;
-		fprintf(stderr, "ERROR: finding real path for '%s': %s\n",
+		error("cannot find real path for '%s': %s",
 			path, strerror(errno));
 		goto out;
 	}
@@ -287,9 +357,8 @@ again:
 	vname = basename(dupvname);
 	free(cpath);
 
-	fd = open_file_or_dir(dname, &dirstream);
+	fd = btrfs_open_dir(dname, &dirstream, 1);
 	if (fd < 0) {
-		fprintf(stderr, "ERROR: can't access '%s'\n", dname);
 		ret = 1;
 		goto out;
 	}
@@ -297,13 +366,12 @@ again:
 	printf("Delete subvolume (%s): '%s/%s'\n",
 		commit_mode == 2 || (commit_mode == 1 && cnt + 1 == argc)
 		? "commit" : "no-commit", dname, vname);
+	memset(&args, 0, sizeof(args));
 	strncpy_null(args.name, vname);
 	res = ioctl(fd, BTRFS_IOC_SNAP_DESTROY, &args);
-	e = errno;
-
 	if(res < 0 ){
-		fprintf( stderr, "ERROR: cannot delete '%s/%s' - %s\n",
-			dname, vname, strerror(e));
+		error("cannot delete '%s/%s': %s", dname, vname,
+			strerror(errno));
 		ret = 1;
 		goto out;
 	}
@@ -311,8 +379,7 @@ again:
 	if (commit_mode == 1) {
 		res = wait_for_commit(fd);
 		if (res < 0) {
-			fprintf(stderr,
-				"ERROR: unable to wait for commit after '%s': %s\n",
+			error("unable to wait for commit after '%s': %s",
 				path, strerror(errno));
 			ret = 1;
 		}
@@ -335,8 +402,7 @@ out:
 	if (commit_mode == 2 && fd != -1) {
 		res = wait_for_commit(fd);
 		if (res < 0) {
-			fprintf(stderr,
-				"ERROR: unable to do final sync: %s\n",
+			error("unable to do final sync after deletion: %s",
 				strerror(errno));
 			ret = 1;
 		}
@@ -404,7 +470,7 @@ static int cmd_subvol_list(int argc, char **argv)
 	while(1) {
 		int c;
 		static const struct option long_options[] = {
-			{"sort", 1, NULL, 'S'},
+			{"sort", required_argument, NULL, 'S'},
 			{NULL, 0, NULL, 0}
 		};
 
@@ -502,16 +568,16 @@ static int cmd_subvol_list(int argc, char **argv)
 	}
 
 	subvol = argv[optind];
-	fd = open_file_or_dir(subvol, &dirstream);
+	fd = btrfs_open_dir(subvol, &dirstream, 1);
 	if (fd < 0) {
 		ret = -1;
-		fprintf(stderr, "ERROR: can't access '%s'\n", subvol);
+		error("can't access '%s'", subvol);
 		goto out;
 	}
 
 	ret = btrfs_list_get_path_rootid(fd, &top_id);
 	if (ret) {
-		fprintf(stderr, "ERROR: can't get rootid for '%s'\n", subvol);
+		error("can't get rootid for '%s'", subvol);
 		goto out;
 	}
 
@@ -550,7 +616,7 @@ out:
 	return !!ret;
 }
 
-static const char * const cmd_snapshot_usage[] = {
+static const char * const cmd_subvol_snapshot_usage[] = {
 	"btrfs subvolume snapshot [-r] [-i <qgroupid>] <source> <dest>|[<dest>/]<name>",
 	"Create a snapshot of the subvolume",
 	"Create a writable/readonly snapshot of the subvolume <source> with",
@@ -563,7 +629,7 @@ static const char * const cmd_snapshot_usage[] = {
 	NULL
 };
 
-static int cmd_snapshot(int argc, char **argv)
+static int cmd_subvol_snapshot(int argc, char **argv)
 {
 	char	*subvol, *dst;
 	int	res, retval;
@@ -610,12 +676,12 @@ static int cmd_snapshot(int argc, char **argv)
 			}
 			break;
 		default:
-			usage(cmd_snapshot_usage);
+			usage(cmd_subvol_snapshot_usage);
 		}
 	}
 
 	if (check_argc_exact(argc - optind, 2))
-		usage(cmd_snapshot_usage);
+		usage(cmd_subvol_snapshot_usage);
 
 	subvol = argv[optind];
 	dst = argv[optind + 1];
@@ -623,17 +689,21 @@ static int cmd_snapshot(int argc, char **argv)
 	retval = 1;	/* failure */
 	res = test_issubvolume(subvol);
 	if (res < 0) {
-		fprintf(stderr, "ERROR: error accessing '%s'\n", subvol);
+		error("cannot access subvolume %s: %s", subvol, strerror(-res));
 		goto out;
 	}
 	if (!res) {
-		fprintf(stderr, "ERROR: '%s' is not a subvolume\n", subvol);
+		error("not a subvolume: %s", subvol);
 		goto out;
 	}
 
 	res = test_isdir(dst);
+	if (res < 0 && res != -ENOENT) {
+		error("cannot access %s: %s", dst, strerror(-res));
+		goto out;
+	}
 	if (res == 0) {
-		fprintf(stderr, "ERROR: '%s' exists and it is not a directory\n", dst);
+		error("'%s' exists and it is not a directory", dst);
 		goto out;
 	}
 
@@ -649,29 +719,23 @@ static int cmd_snapshot(int argc, char **argv)
 	}
 
 	if (!test_issubvolname(newname)) {
-		fprintf(stderr, "ERROR: incorrect snapshot name '%s'\n",
-			newname);
+		error("invalid snapshot name '%s'", newname);
 		goto out;
 	}
 
 	len = strlen(newname);
 	if (len == 0 || len >= BTRFS_VOL_NAME_MAX) {
-		fprintf(stderr, "ERROR: snapshot name too long '%s'\n",
-			newname);
+		error("snapshot name too long '%s'", newname);
 		goto out;
 	}
 
-	fddst = open_file_or_dir(dstdir, &dirstream1);
-	if (fddst < 0) {
-		fprintf(stderr, "ERROR: can't access '%s'\n", dstdir);
+	fddst = btrfs_open_dir(dstdir, &dirstream1, 1);
+	if (fddst < 0)
 		goto out;
-	}
 
-	fd = open_file_or_dir(subvol, &dirstream2);
-	if (fd < 0) {
-		fprintf(stderr, "ERROR: can't access '%s'\n", dstdir);
+	fd = btrfs_open_dir(subvol, &dirstream2, 1);
+	if (fd < 0)
 		goto out;
-	}
 
 	if (readonly) {
 		args.flags |= BTRFS_SUBVOL_RDONLY;
@@ -693,8 +757,7 @@ static int cmd_snapshot(int argc, char **argv)
 	res = ioctl(fddst, BTRFS_IOC_SNAP_CREATE_V2, &args);
 
 	if (res < 0) {
-		fprintf( stderr, "ERROR: cannot snapshot '%s' - %s\n",
-			subvol, strerror(errno));
+		error("cannot snapshot '%s': %s", subvol, strerror(errno));
 		goto out;
 	}
 
@@ -729,22 +792,20 @@ static int cmd_subvol_get_default(int argc, char **argv)
 		usage(cmd_subvol_get_default_usage);
 
 	subvol = argv[1];
-	fd = open_file_or_dir(subvol, &dirstream);
-	if (fd < 0) {
-		fprintf(stderr, "ERROR: can't access '%s'\n", subvol);
+	fd = btrfs_open_dir(subvol, &dirstream, 1);
+	if (fd < 0)
 		return 1;
-	}
 
 	ret = btrfs_list_get_default_subvolume(fd, &default_id);
 	if (ret) {
-		fprintf(stderr, "ERROR: can't perform the search - %s\n",
+		error("failed to look up default subvolume: %s",
 			strerror(errno));
 		goto out;
 	}
 
 	ret = 1;
 	if (default_id == 0) {
-		fprintf(stderr, "ERROR: 'default' dir item not found\n");
+		error("'default' dir item not found");
 		goto out;
 	}
 
@@ -797,30 +858,28 @@ static int cmd_subvol_set_default(int argc, char **argv)
 
 	objectid = arg_strtou64(subvolid);
 
-	fd = open_file_or_dir(path, &dirstream);
-	if (fd < 0) {
-		fprintf(stderr, "ERROR: can't access '%s'\n", path);
+	fd = btrfs_open_dir(path, &dirstream, 1);
+	if (fd < 0)
 		return 1;
-	}
 
 	ret = ioctl(fd, BTRFS_IOC_DEFAULT_SUBVOL, &objectid);
 	e = errno;
 	close_file_or_dir(fd, dirstream);
 	if (ret < 0) {
-		fprintf(stderr, "ERROR: unable to set a new default subvolume - %s\n",
+		error("unable to set a new default subvolume: %s",
 			strerror(e));
 		return 1;
 	}
 	return 0;
 }
 
-static const char * const cmd_find_new_usage[] = {
+static const char * const cmd_subvol_find_new_usage[] = {
 	"btrfs subvolume find-new <path> <lastgen>",
 	"List the recently modified files in a filesystem",
 	NULL
 };
 
-static int cmd_find_new(int argc, char **argv)
+static int cmd_subvol_find_new(int argc, char **argv)
 {
 	int fd;
 	int ret;
@@ -829,30 +888,28 @@ static int cmd_find_new(int argc, char **argv)
 	DIR *dirstream = NULL;
 
 	if (check_argc_exact(argc, 3))
-		usage(cmd_find_new_usage);
+		usage(cmd_subvol_find_new_usage);
 
 	subvol = argv[1];
 	last_gen = arg_strtou64(argv[2]);
 
 	ret = test_issubvolume(subvol);
 	if (ret < 0) {
-		fprintf(stderr, "ERROR: error accessing '%s'\n", subvol);
+		error("cannot access subvolume %s: %s", subvol, strerror(-ret));
 		return 1;
 	}
 	if (!ret) {
-		fprintf(stderr, "ERROR: '%s' is not a subvolume\n", subvol);
+		error("not a subvolume: %s", subvol);
 		return 1;
 	}
 
-	fd = open_file_or_dir(subvol, &dirstream);
-	if (fd < 0) {
-		fprintf(stderr, "ERROR: can't access '%s'\n", subvol);
+	fd = btrfs_open_dir(subvol, &dirstream, 1);
+	if (fd < 0)
 		return 1;
-	}
 
 	ret = ioctl(fd, BTRFS_IOC_SYNC);
 	if (ret < 0) {
-		fprintf(stderr, "ERROR: unable to fs-syncing '%s' - %s\n",
+		error("sync ioctl failed on '%s': %s",
 			subvol, strerror(errno));
 		close_file_or_dir(fd, dirstream);
 		return 1;
@@ -877,74 +934,64 @@ static int cmd_subvol_show(int argc, char **argv)
 	char uuidparse[BTRFS_UUID_UNPARSED_SIZE];
 	char *fullpath = NULL, *svpath = NULL, *mnt = NULL;
 	char raw_prefix[] = "\t\t\t\t";
-	u64 sv_id, mntid;
+	u64 sv_id;
 	int fd = -1, mntfd = -1;
 	int ret = 1;
 	DIR *dirstream1 = NULL, *dirstream2 = NULL;
 
-	if (check_argc_exact(argc, 2))
+	clean_args_no_options(argc, argv, cmd_subvol_show_usage);
+
+	if (check_argc_exact(argc - optind, 1))
 		usage(cmd_subvol_show_usage);
 
-	fullpath = realpath(argv[1], NULL);
+	fullpath = realpath(argv[optind], NULL);
 	if (!fullpath) {
-		fprintf(stderr, "ERROR: finding real path for '%s', %s\n",
-			argv[1], strerror(errno));
+		error("cannot find real path for '%s': %s",
+			argv[optind], strerror(errno));
 		goto out;
 	}
 
 	ret = test_issubvolume(fullpath);
 	if (ret < 0) {
-		fprintf(stderr, "ERROR: error accessing '%s'\n", fullpath);
+		error("cannot access subvolume %s: %s", fullpath,
+			strerror(-ret));
 		goto out;
 	}
 	if (!ret) {
-		fprintf(stderr, "ERROR: '%s' is not a subvolume\n", fullpath);
+		error("not a subvolume: %s", fullpath);
 		ret = 1;
 		goto out;
 	}
 
 	ret = find_mount_root(fullpath, &mnt);
 	if (ret < 0) {
-		fprintf(stderr, "ERROR: find_mount_root failed on '%s': "
-				"%s\n", fullpath, strerror(-ret));
+		error("find_mount_root failed on '%s': %s",
+			fullpath, strerror(-ret));
 		goto out;
 	}
 	if (ret > 0) {
-		fprintf(stderr,
-			"ERROR: %s doesn't belong to btrfs mount point\n",
-			fullpath);
+		error("%s doesn't belong to btrfs mount point", fullpath);
 		goto out;
 	}
 	ret = 1;
 	svpath = get_subvol_name(mnt, fullpath);
 
-	fd = open_file_or_dir(fullpath, &dirstream1);
-	if (fd < 0) {
-		fprintf(stderr, "ERROR: can't access '%s'\n", fullpath);
+	fd = btrfs_open_dir(fullpath, &dirstream1, 1);
+	if (fd < 0)
 		goto out;
-	}
 
 	ret = btrfs_list_get_path_rootid(fd, &sv_id);
 	if (ret) {
-		fprintf(stderr, "ERROR: can't get rootid for '%s'\n",
-			fullpath);
+		error("can't get rootid for '%s'", fullpath);
 		goto out;
 	}
 
-	mntfd = open_file_or_dir(mnt, &dirstream2);
-	if (mntfd < 0) {
-		fprintf(stderr, "ERROR: can't access '%s'\n", mnt);
+	mntfd = btrfs_open_dir(mnt, &dirstream2, 1);
+	if (mntfd < 0)
 		goto out;
-	}
-
-	ret = btrfs_list_get_path_rootid(mntfd, &mntid);
-	if (ret) {
-		fprintf(stderr, "ERROR: can't get rootid for '%s'\n", mnt);
-		goto out;
-	}
 
 	if (sv_id == BTRFS_FS_TREE_OBJECTID) {
-		printf("%s is btrfs root\n", fullpath);
+		printf("%s is toplevel subvolume\n", fullpath);
 		goto out;
 	}
 
@@ -953,8 +1000,7 @@ static int cmd_subvol_show(int argc, char **argv)
 
 	ret = btrfs_get_subvol(mntfd, &get_ri);
 	if (ret) {
-		fprintf(stderr, "ERROR: can't find '%s'\n",
-			svpath);
+		error("can't find '%s'", svpath);
 		goto out;
 	}
 
@@ -966,28 +1012,34 @@ static int cmd_subvol_show(int argc, char **argv)
 		strcpy(uuidparse, "-");
 	else
 		uuid_unparse(get_ri.uuid, uuidparse);
-	printf("\tuuid: \t\t\t%s\n", uuidparse);
+	printf("\tUUID: \t\t\t%s\n", uuidparse);
 
 	if (uuid_is_null(get_ri.puuid))
 		strcpy(uuidparse, "-");
 	else
 		uuid_unparse(get_ri.puuid, uuidparse);
-	printf("\tParent uuid: \t\t%s\n", uuidparse);
+	printf("\tParent UUID: \t\t%s\n", uuidparse);
+
+	if (uuid_is_null(get_ri.ruuid))
+		strcpy(uuidparse, "-");
+	else
+		uuid_unparse(get_ri.ruuid, uuidparse);
+	printf("\tReceived UUID: \t\t%s\n", uuidparse);
 
 	if (get_ri.otime) {
 		struct tm tm;
 
 		localtime_r(&get_ri.otime, &tm);
-		strftime(tstr, 256, "%Y-%m-%d %X", &tm);
+		strftime(tstr, 256, "%Y-%m-%d %X %z", &tm);
 	} else
 		strcpy(tstr, "-");
 	printf("\tCreation time: \t\t%s\n", tstr);
 
-	printf("\tObject ID: \t\t%llu\n", get_ri.root_id);
-	printf("\tGeneration (Gen): \t%llu\n", get_ri.gen);
+	printf("\tSubvolume ID: \t\t%llu\n", get_ri.root_id);
+	printf("\tGeneration: \t\t%llu\n", get_ri.gen);
 	printf("\tGen at creation: \t%llu\n", get_ri.ogen);
-	printf("\tParent: \t\t%llu\n", get_ri.ref_tree);
-	printf("\tTop Level: \t\t%llu\n", get_ri.top_id);
+	printf("\tParent ID: \t\t%llu\n", get_ri.ref_tree);
+	printf("\tTop level ID: \t\t%llu\n", get_ri.top_id);
 
 	if (get_ri.flags & BTRFS_ROOT_SUBVOL_RDONLY)
 		printf("\tFlags: \t\t\treadonly\n");
@@ -1022,41 +1074,15 @@ static const char * const cmd_subvol_sync_usage[] = {
 	"Wait until given subvolume(s) are completely removed from the filesystem.",
 	"Wait until given subvolume(s) are completely removed from the filesystem",
 	"after deletion.",
-	"If no subvolume id is given, wait until all ongoing deletion requests",
-	"are complete. This may take long if new deleted subvolumes appear during",
-	"the sleep interval.",
+	"If no subvolume id is given, wait until all current deletion requests",
+	"are completed, but do not wait for subvolumes deleted meanwhile.",
+	"The status of subvolume ids is checked periodically.",
 	"",
 	"-s <N>       sleep N seconds between checks (default: 1)",
 	NULL
 };
 
-static int is_subvolume_cleaned(int fd, u64 subvolid)
-{
-	int ret;
-	struct btrfs_ioctl_search_args args;
-	struct btrfs_ioctl_search_key *sk = &args.key;
-
-	sk->tree_id = BTRFS_ROOT_TREE_OBJECTID;
-	sk->min_objectid = subvolid;
-	sk->max_objectid = subvolid;
-	sk->min_type = BTRFS_ROOT_ITEM_KEY;
-	sk->max_type = BTRFS_ROOT_ITEM_KEY;
-	sk->min_offset = 0;
-	sk->max_offset = (u64)-1;
-	sk->min_transid = 0;
-	sk->max_transid = (u64)-1;
-	sk->nr_items = 1;
-
-	ret = ioctl(fd, BTRFS_IOC_TREE_SEARCH, &args);
-	if (ret < 0)
-		return -errno;
-
-	if (sk->nr_items == 0)
-		return 1;
-
-	return 0;
-}
-
+#if 0
 /*
  * If we're looking for any dead subvolume, take a shortcut and look
  * for any ORPHAN_ITEMs in the tree root
@@ -1120,6 +1146,84 @@ again:
 
 	return 1;
 }
+#endif
+
+#define SUBVOL_ID_BATCH		1024
+
+/*
+ * Enumerate all dead subvolumes that exist in the filesystem.
+ * Fill @ids and reallocate to bigger size if needed.
+ */
+static int enumerate_dead_subvols(int fd, u64 **ids)
+{
+	int ret;
+	struct btrfs_ioctl_search_args args;
+	struct btrfs_ioctl_search_key *sk = &args.key;
+	int idx = 0;
+	int count = 0;
+
+	memset(&args, 0, sizeof(args));
+
+	sk->tree_id = BTRFS_ROOT_TREE_OBJECTID;
+	sk->min_objectid = BTRFS_ORPHAN_OBJECTID;
+	sk->max_objectid = BTRFS_ORPHAN_OBJECTID;
+	sk->min_type = BTRFS_ORPHAN_ITEM_KEY;
+	sk->max_type = BTRFS_ORPHAN_ITEM_KEY;
+	sk->min_offset = 0;
+	sk->max_offset = (u64)-1;
+	sk->min_transid = 0;
+	sk->max_transid = (u64)-1;
+	sk->nr_items = 4096;
+
+	*ids = NULL;
+	while (1) {
+		struct btrfs_ioctl_search_header *sh;
+		unsigned long off;
+		int i;
+
+		ret = ioctl(fd, BTRFS_IOC_TREE_SEARCH, &args);
+		if (ret < 0)
+			return -errno;
+
+		if (!sk->nr_items)
+			return idx;
+
+		off = 0;
+		for (i = 0; i < sk->nr_items; i++) {
+			sh = (struct btrfs_ioctl_search_header*)(args.buf + off);
+			off += sizeof(*sh);
+
+			if (sh->type == BTRFS_ORPHAN_ITEM_KEY) {
+				if (idx >= count) {
+					u64 *newids;
+
+					count += SUBVOL_ID_BATCH;
+					newids = (u64*)realloc(*ids, count);
+					if (!newids)
+						return -ENOMEM;
+					*ids = newids;
+				}
+				(*ids)[idx] = sh->offset;
+				idx++;
+			}
+			off += sh->len;
+
+			sk->min_objectid = sh->objectid;
+			sk->min_type = sh->type;
+			sk->min_offset = sh->offset;
+		}
+		if (sk->min_offset < (u64)-1)
+			sk->min_offset++;
+		else
+			break;
+		if (sk->min_type != BTRFS_ORPHAN_ITEM_KEY)
+			break;
+		if (sk->min_objectid != BTRFS_ORPHAN_OBJECTID)
+			break;
+	}
+
+	return idx;
+}
 
 static int cmd_subvol_sync(int argc, char **argv)
 {
@@ -1129,7 +1233,6 @@ static int cmd_subvol_sync(int argc, char **argv)
 	DIR *dirstream = NULL;
 	u64 *ids = NULL;
 	int id_count;
-	int remaining;
 	int sleep_interval = 1;
 
 	optind = 1;
@@ -1143,8 +1246,7 @@ static int cmd_subvol_sync(int argc, char **argv)
 		case 's':
 			sleep_interval = atoi(argv[optind]);
 			if (sleep_interval < 1) {
-				fprintf(stderr,
-					"ERROR: invalid sleep interval %s\n",
+				error("invalid sleep interval %s",
 					argv[optind]);
 				ret = 1;
 				goto out;
@@ -1158,88 +1260,57 @@ static int cmd_subvol_sync(int argc, char **argv)
 	if (check_argc_min(argc - optind, 1))
 		usage(cmd_subvol_sync_usage);
 
-	fd = open_file_or_dir(argv[optind], &dirstream);
+	fd = btrfs_open_dir(argv[optind], &dirstream, 1);
 	if (fd < 0) {
-		fprintf(stderr, "ERROR: can't access '%s'\n", argv[optind]);
 		ret = 1;
 		goto out;
 	}
 	optind++;
 
 	id_count = argc - optind;
-
-	/*
-	 * Wait for all
-	 */
 	if (!id_count) {
-		while (1) {
-			ret = fs_has_dead_subvolumes(fd);
-			if (ret < 0) {
-				fprintf(stderr, "ERROR: can't perform the search - %s\n",
-						strerror(-ret));
+		id_count = enumerate_dead_subvols(fd, &ids);
+		if (id_count < 0) {
+			error("can't enumerate dead subvolumes: %s",
+					strerror(-id_count));
+			ret = 1;
+			goto out;
+		}
+		if (id_count == 0) {
+			ret = 0;
+			goto out;
+		}
+	} else {
+		ids = (u64*)malloc(id_count * sizeof(u64));
+		if (!ids) {
+			error("not enough memory");
+			ret = 1;
+			goto out;
+		}
+
+		for (i = 0; i < id_count; i++) {
+			u64 id;
+			const char *arg;
+
+			arg = argv[optind + i];
+			errno = 0;
+			id = strtoull(arg, NULL, 10);
+			if (errno < 0) {
+				error("unrecognized subvolume id %s", arg);
 				ret = 1;
 				goto out;
 			}
-			if (!ret)
-				goto out;
-			sleep(sleep_interval);
-		}
-	}
-
-	/*
-	 * Wait only for the requested ones
-	 */
-	ids = (u64*)malloc(sizeof(u64) * id_count);
-
-	if (!ids) {
-		fprintf(stderr, "ERROR: not enough memory\n");
-		ret = 1;
-		goto out;
-	}
-
-	for (i = 0; i < id_count; i++) {
-		u64 id;
-		const char *arg;
-
-		arg = argv[optind + i];
-		errno = 0;
-		id = strtoull(arg, NULL, 10);
-		if (errno < 0) {
-			fprintf(stderr, "ERROR: unrecognized subvolume id %s\n",
-				arg);
-			ret = 1;
-			goto out;
-		}
-		if (id < BTRFS_FIRST_FREE_OBJECTID || id > BTRFS_LAST_FREE_OBJECTID) {
-			fprintf(stderr, "ERROR: subvolume id %s out of range\n",
-				arg);
-			ret = 1;
-			goto out;
-		}
-		ids[i] = id;
-	}
-
-	remaining = id_count;
-	while (1) {
-		for (i = 0; i < id_count; i++) {
-			if (!ids[i])
-				continue;
-			ret = is_subvolume_cleaned(fd, ids[i]);
-			if (ret < 0) {
-				fprintf(stderr, "ERROR: can't perform the search - %s\n",
-						strerror(-ret));
+			if (id < BTRFS_FIRST_FREE_OBJECTID
+					|| id > BTRFS_LAST_FREE_OBJECTID) {
+				error("subvolume id %s out of range\n", arg);
+				ret = 1;
 				goto out;
 			}
-			if (ret) {
-				printf("Subvolume id %llu is gone\n", ids[i]);
-				ids[i] = 0;
-				remaining--;
-			}
+			ids[i] = id;
 		}
-		if (!remaining)
-			break;
-		sleep(sleep_interval);
 	}
+
+	ret = wait_for_subvolume_cleaning(fd, id_count, ids, sleep_interval);
 
 out:
 	free(ids);
@@ -1248,17 +1319,22 @@ out:
 	return !!ret;
 }
 
+static const char subvolume_cmd_group_info[] =
+"manage subvolumes: create, delete, list, etc";
+
 const struct cmd_group subvolume_cmd_group = {
-	subvolume_cmd_group_usage, NULL, {
+	subvolume_cmd_group_usage, subvolume_cmd_group_info, {
 		{ "create", cmd_subvol_create, cmd_subvol_create_usage, NULL, 0 },
 		{ "delete", cmd_subvol_delete, cmd_subvol_delete_usage, NULL, 0 },
 		{ "list", cmd_subvol_list, cmd_subvol_list_usage, NULL, 0 },
-		{ "snapshot", cmd_snapshot, cmd_snapshot_usage, NULL, 0 },
+		{ "snapshot", cmd_subvol_snapshot, cmd_subvol_snapshot_usage,
+			NULL, 0 },
 		{ "get-default", cmd_subvol_get_default,
 			cmd_subvol_get_default_usage, NULL, 0 },
 		{ "set-default", cmd_subvol_set_default,
 			cmd_subvol_set_default_usage, NULL, 0 },
-		{ "find-new", cmd_find_new, cmd_find_new_usage, NULL, 0 },
+		{ "find-new", cmd_subvol_find_new, cmd_subvol_find_new_usage,
+			NULL, 0 },
 		{ "show", cmd_subvol_show, cmd_subvol_show_usage, NULL, 0 },
 		{ "sync", cmd_subvol_sync, cmd_subvol_sync_usage, NULL, 0 },
 		NULL_CMD_STRUCT

@@ -521,6 +521,20 @@ btrfs_check_leaf(struct btrfs_root *root, struct btrfs_disk_key *parent_key,
 			goto fail;
 		}
 	}
+
+	for (i = 0; i < nritems; i++) {
+		if (btrfs_item_end_nr(buf, i) > BTRFS_LEAF_DATA_SIZE(root)) {
+			btrfs_item_key(buf, &key, 0);
+			btrfs_print_key(&key);
+			fflush(stdout);
+			ret = BTRFS_TREE_BLOCK_INVALID_OFFSETS;
+			fprintf(stderr, "slot end outside of leaf %llu > %llu\n",
+				(unsigned long long)btrfs_item_end_nr(buf, i),
+				(unsigned long long)BTRFS_LEAF_DATA_SIZE(root));
+			goto fail;
+		}
+	}
+
 	return BTRFS_TREE_BLOCK_CLEAN;
 fail:
 	if (btrfs_header_owner(buf) == BTRFS_EXTENT_TREE_OBJECTID) {
@@ -1044,26 +1058,28 @@ int btrfs_find_item(struct btrfs_root *fs_root, struct btrfs_path *found_path,
 		path = found_path;
 
 	ret = btrfs_search_slot(NULL, fs_root, &key, path, 0, 0);
-	if ((ret < 0) || (found_key == NULL)) {
-		if (path != found_path)
-			btrfs_free_path(path);
-		return ret;
-	}
+	if ((ret < 0) || (found_key == NULL))
+		goto out;
 
 	eb = path->nodes[0];
 	if (ret && path->slots[0] >= btrfs_header_nritems(eb)) {
 		ret = btrfs_next_leaf(fs_root, path);
 		if (ret)
-			return ret;
+			goto out;
 		eb = path->nodes[0];
 	}
 
 	btrfs_item_key_to_cpu(eb, found_key, path->slots[0]);
 	if (found_key->type != key.type ||
-			found_key->objectid != key.objectid)
-		return 1;
+			found_key->objectid != key.objectid) {
+		ret = 1;
+		goto out;
+	}
 
-	return 0;
+out:
+	if (path != found_path)
+		btrfs_free_path(path);
+	return ret;
 }
 
 /*
@@ -1603,13 +1619,14 @@ static int leaf_space_used(struct extent_buffer *l, int start, int nr)
  */
 int btrfs_leaf_free_space(struct btrfs_root *root, struct extent_buffer *leaf)
 {
+	u32 nodesize = (root ? BTRFS_LEAF_DATA_SIZE(root) : leaf->len);
 	int nritems = btrfs_header_nritems(leaf);
 	int ret;
-	ret = BTRFS_LEAF_DATA_SIZE(root) - leaf_space_used(leaf, 0, nritems);
+	ret = nodesize - leaf_space_used(leaf, 0, nritems);
 	if (ret < 0) {
-		printk("leaf free space ret %d, leaf data size %lu, used %d nritems %d\n",
-		       ret, (unsigned long) BTRFS_LEAF_DATA_SIZE(root),
-		       leaf_space_used(leaf, 0, nritems), nritems);
+		printk("leaf free space ret %d, leaf data size %u, used %d nritems %d\n",
+		       ret, nodesize, leaf_space_used(leaf, 0, nritems),
+		       nritems);
 	}
 	return ret;
 }
@@ -2226,6 +2243,7 @@ split:
 
 
 	buf = kmalloc(item_size, GFP_NOFS);
+	BUG_ON(!buf);
 	read_extent_buffer(leaf, buf, btrfs_item_ptr_offset(leaf,
 			    path->slots[0]), item_size);
 	slot = path->slots[0] + 1;

@@ -45,18 +45,15 @@ static int quota_ctl(int cmd, int argc, char **argv)
 	memset(&args, 0, sizeof(args));
 	args.cmd = cmd;
 
-	fd = open_file_or_dir(path, &dirstream);
-	if (fd < 0) {
-		fprintf(stderr, "ERROR: can't access '%s'\n", path);
+	fd = btrfs_open_dir(path, &dirstream, 1);
+	if (fd < 0)
 		return 1;
-	}
 
 	ret = ioctl(fd, BTRFS_IOC_QUOTA_CTL, &args);
 	e = errno;
 	close_file_or_dir(fd, dirstream);
 	if (ret < 0) {
-		fprintf(stderr, "ERROR: quota command failed: %s\n",
-			strerror(e));
+		error("quota command failed: %s", strerror(e));
 		return 1;
 	}
 	return 0;
@@ -109,7 +106,7 @@ static int cmd_quota_rescan(int argc, char **argv)
 	int e;
 	char *path = NULL;
 	struct btrfs_ioctl_quota_rescan_args args;
-	int ioctlnum = BTRFS_IOC_QUOTA_RESCAN;
+	unsigned long ioctlnum = BTRFS_IOC_QUOTA_RESCAN;
 	DIR *dirstream = NULL;
 	int wait_for_completion = 0;
 
@@ -131,7 +128,7 @@ static int cmd_quota_rescan(int argc, char **argv)
 	}
 
 	if (ioctlnum != BTRFS_IOC_QUOTA_RESCAN && wait_for_completion) {
-		fprintf(stderr, "ERROR: -w cannot be used with -s\n");
+		error("switch -w cannot be used with -s");
 		return 1;
 	}
 
@@ -141,11 +138,9 @@ static int cmd_quota_rescan(int argc, char **argv)
 	memset(&args, 0, sizeof(args));
 
 	path = argv[optind];
-	fd = open_file_or_dir(path, &dirstream);
-	if (fd < 0) {
-		fprintf(stderr, "ERROR: can't access '%s'\n", path);
+	fd = btrfs_open_dir(path, &dirstream, 1);
+	if (fd < 0)
 		return 1;
-	}
 
 	ret = ioctl(fd, ioctlnum, &args);
 	e = errno;
@@ -158,8 +153,7 @@ static int cmd_quota_rescan(int argc, char **argv)
 
 	if (ioctlnum == BTRFS_IOC_QUOTA_RESCAN) {
 		if (ret < 0) {
-			fprintf(stderr, "ERROR: quota rescan failed: "
-				"%s\n", strerror(e));
+			error("quota rescan failed: %s", strerror(e));
 			return 1;
 		}  else {
 			printf("quota rescan started\n");
@@ -176,8 +170,11 @@ static int cmd_quota_rescan(int argc, char **argv)
 	return 0;
 }
 
+static const char quota_cmd_group_info[] =
+"manage filesystem quota settings";
+
 const struct cmd_group quota_cmd_group = {
-	quota_cmd_group_usage, NULL, {
+	quota_cmd_group_usage, quota_cmd_group_info, {
 		{ "enable", cmd_quota_enable, cmd_quota_enable_usage, NULL, 0 },
 		{ "disable", cmd_quota_disable, cmd_quota_disable_usage,
 		   NULL, 0 },

@@ -1,14 +1,14 @@
 Name:		btrfs-progs
-Version:	3.19.1
+Version:	4.4.1
 Release:	1%{?dist}
 Summary:	Userspace programs for btrfs
 
 Group:		System Environment/Base
 License:	GPLv2
 URL:		http://btrfs.wiki.kernel.org/index.php/Main_Page
-Source0:	https://www.kernel.org/pub/linux/kernel/people/mason/%{name}/%{name}-v%{version}.tar.xz
+Source0:	https://www.kernel.org/pub/linux/kernel/people/kdave/%{name}/%{name}-v%{version}.tar.xz
 
-# Valgrind patch no longer applied, but kept for posterity
+# Patches no longer applied, but kept for posterity
 # Still must reverse-engineer fixes in there and get upstream
 Patch0:		btrfs-progs-valgrind.patch
 Patch1:		btrfs-init-dev-list.patch
@@ -40,7 +40,6 @@ btrfs filesystem-specific programs.
 
 %prep
 %setup -q -n %{name}-v%{version}
-%patch1 -p1
 
 %build
 ./autogen.sh
@@ -73,14 +72,17 @@ rm -rf $RPM_BUILD_ROOT
 %{_sbindir}/btrfs-zero-log
 %{_sbindir}/btrfs-find-root
 %{_sbindir}/btrfs-show-super
-%{_mandir}/man8/*.gz
 %{_mandir}/man5/*.gz
+%{_mandir}/man8/*.gz
 
 %files devel
 %{_includedir}/*
 %{_libdir}/libbtrfs.so
 
 %changelog
+* Wed Mar 16 2016 Eric Sandeen <sandeen@redhat.com> 4.4.1-1
+- New upstream release (#1298678)
+
 * Thu Mar 26 2015 Eric Sandeen <sandeen@redhat.com> 3.19.1-1
 - New upstream release (#1205797)
 

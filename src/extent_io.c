@@ -538,12 +538,11 @@ static struct extent_buffer *__alloc_extent_buffer(struct extent_io_tree *tree,
 {
 	struct extent_buffer *eb;
 
-	eb = malloc(sizeof(struct extent_buffer) + blocksize);
+	eb = calloc(1, sizeof(struct extent_buffer) + blocksize);
 	if (!eb) {
 		BUG();
 		return NULL;
 	}
-	memset(eb, 0, sizeof(struct extent_buffer) + blocksize);
 
 	eb->start = bytenr;
 	eb->len = blocksize;
@@ -714,7 +713,7 @@ int read_data_from_disk(struct btrfs_fs_info *info, void *buf, u64 offset,
 		device = multi->stripes[0].dev;
 
 		read_len = min(bytes_left, read_len);
-		if (device->fd == 0) {
+		if (device->fd <= 0) {
 			kfree(multi);
 			return -EIO;
 		}
@@ -790,7 +789,7 @@ int write_data_to_disk(struct btrfs_fs_info *info, void *buf, u64 offset,
 			raid_map = NULL;
 		} else while (dev_nr < multi->num_stripes) {
 			device = multi->stripes[dev_nr].dev;
-			if (device->fd == 0) {
+			if (device->fd <= 0) {
 				kfree(multi);
 				return -EIO;
 			}
@@ -884,4 +883,10 @@ void memset_extent_buffer(struct extent_buffer *eb, char c,
 			  unsigned long start, unsigned long len)
 {
 	memset(eb->data + start, c, len);
+}
+
+int extent_buffer_test_bit(struct extent_buffer *eb, unsigned long start,
+			   unsigned long nr)
+{
+	return test_bit(nr, (unsigned long *)(eb->data + start));
 }

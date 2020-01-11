@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "volumes.h"
 #include "crc32c.h"
 #include "commands.h"
 #include "utils.h"
@@ -34,15 +35,6 @@ static inline const char *skip_prefix(const char *str, const char *prefix)
 {
 	size_t len = strlen(prefix);
 	return strncmp(str, prefix, len) ? NULL : str + len;
-}
-
-int prefixcmp(const char *str, const char *prefix)
-{
-	for (; ; str++, prefix++)
-		if (!*prefix)
-			return 0;
-		else if (*str != *prefix)
-			return (unsigned char)*prefix - (unsigned char)*str;
 }
 
 static int parse_one_token(const char *arg, const struct cmd_group *grp,
@@ -171,20 +163,24 @@ static int cmd_version(int argc, char **argv)
 	return 0;
 }
 
-static void handle_options(int *argc, char ***argv)
+static void check_options(int argc, char **argv)
 {
-	if (*argc > 0) {
-		const char *arg = (*argv)[0];
-		if (arg[0] != '-' ||
-		    !strcmp(arg, "--help") ||
-		    !strcmp(arg, "--version"))
-			return;
-		fprintf(stderr, "Unknown option: %s\n", arg);
-		fprintf(stderr, "usage: %s\n",
-			btrfs_cmd_group.usagestr[0]);
-		exit(129);
-	}
-	return;
+	const char *arg;
+
+	if (argc == 0)
+		return;
+
+	arg = argv[0];
+
+	if (arg[0] != '-' ||
+	    !strcmp(arg, "--help") ||
+	    !strcmp(arg, "--version"))
+		return;
+
+	fprintf(stderr, "Unknown option: %s\n", arg);
+	fprintf(stderr, "usage: %s\n",
+		btrfs_cmd_group.usagestr[0]);
+	exit(129);
 }
 
 static const struct cmd_group btrfs_cmd_group = {
@@ -214,6 +210,7 @@ int main(int argc, char **argv)
 {
 	const struct cmd_struct *cmd;
 	const char *bname;
+	int ret;
 
 	if ((bname = strrchr(argv[0], '/')) != NULL)
 		bname++;
@@ -225,12 +222,12 @@ int main(int argc, char **argv)
 	} else {
 		argc--;
 		argv++;
-		handle_options(&argc, &argv);
+		check_options(argc, argv);
 		if (argc > 0) {
 			if (!prefixcmp(argv[0], "--"))
 				argv[0] += 2;
 		} else {
-			usage_command_group(&btrfs_cmd_group, 0, 0);
+			usage_command_group_short(&btrfs_cmd_group);
 			exit(1);
 		}
 	}
@@ -242,5 +239,10 @@ int main(int argc, char **argv)
 	crc32c_optimization_init();
 
 	fixup_argv0(argv, cmd->token);
-	exit(cmd->fn(argc, argv));
+
+	ret = cmd->fn(argc, argv);
+
+	btrfs_close_all_devices();
+
+	exit(ret);
 }

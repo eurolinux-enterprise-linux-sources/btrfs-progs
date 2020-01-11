@@ -32,35 +32,6 @@ static const char * const property_cmd_group_usage[] = {
 	NULL
 };
 
-static const char * const cmd_get_usage[] = {
-	"btrfs property get [-t <type>] <object> [<name>]",
-	"Gets a property from a btrfs object.",
-	"If no name is specified, all properties for the given object are",
-	"printed.",
-	"A filesystem object can be a the filesystem itself, a subvolume,",
-	"an inode or a device. The '-t <type>' option can be used to explicitly",
-	"specify what type of object you meant. This is only needed when a",
-	"property could be set for more then one object type. Possible types",
-	"are s[ubvol], f[ilesystem], i[node] and d[evice].",
-	NULL
-};
-
-static const char * const cmd_set_usage[] = {
-	"btrfs property set [-t <type>] <object> <name> <value>",
-	"Sets a property on a btrfs object.",
-	"Please see the help of 'btrfs property get' for a description of",
-	"objects and object types.",
-	NULL
-};
-
-static const char * const cmd_list_usage[] = {
-	"btrfs property list [-t <type>] <object>",
-	"Lists available properties with their descriptions for the given object.",
-	"Please see the help of 'btrfs property get' for a description of",
-	"objects and object types.",
-	NULL
-};
-
 static int parse_prop(const char *arg, const struct prop_handler *props,
 		      const struct prop_handler **prop_ret)
 {
@@ -86,7 +57,7 @@ static int get_fsid(const char *path, u8 *fsid, int silent)
 	if (fd < 0) {
 		ret = -errno;
 		if (!silent)
-			fprintf(stderr, "ERROR: open %s failed. %s\n", path,
+			error("failed to open %s: %s", path,
 				strerror(-ret));
 		goto out;
 	}
@@ -149,8 +120,7 @@ static int check_is_root(const char *object)
 
 	ret = get_fsid(object, fsid, 0);
 	if (ret < 0) {
-		fprintf(stderr, "ERROR: get_fsid for %s failed. %s\n", object,
-				strerror(-ret));
+		error("get_fsid for %s failed: %s", object, strerror(-ret));
 		goto out;
 	}
 
@@ -162,8 +132,7 @@ static int check_is_root(const char *object)
 		ret = 1;
 		goto out;
 	} else if (ret < 0) {
-		fprintf(stderr, "ERROR: get_fsid for %s failed. %s\n", tmp,
-			strerror(-ret));
+		error("get_fsid for %s failed: %s", tmp, strerror(-ret));
 		goto out;
 	}
 
@@ -285,28 +254,26 @@ static int setget_prop(int types, const char *object,
 
 	ret = parse_prop(name, prop_handlers, &prop);
 	if (ret == -1) {
-		fprintf(stderr, "ERROR: property is unknown\n");
+		error("unknown property: %s", name);
 		ret = 40;
 		goto out;
 	}
 
 	types &= prop->types;
 	if (!types) {
-		fprintf(stderr,
-			"ERROR: object is not compatible with property\n");
+		error("object is not compatible with property: %s", prop->name);
 		ret = 47;
 		goto out;
 	}
 
 	if (count_bits(types) > 1) {
-		fprintf(stderr,
-			"ERROR: type of object is ambiguous. Please specify a type by hand.\n");
+		error("type of object is ambiguous, please use option -t");
 		ret = 48;
 		goto out;
 	}
 
 	if (value && prop->read_only) {
-		fprintf(stderr, "ERROR: %s is a read-only property.\n",
+		error("property is read-only property: %s",
 				prop->name);
 		ret = 51;
 		goto out;
@@ -361,7 +328,7 @@ static void parse_args(int argc, char **argv,
 			   !strcmp(type_str, "device")) {
 			*types = prop_object_dev;
 		} else {
-			fprintf(stderr, "ERROR: invalid object type.\n");
+			error("invalid object type: %s", type_str);
 			usage(usage_str);
 		}
 	}
@@ -374,27 +341,38 @@ static void parse_args(int argc, char **argv,
 		*value = argv[optind++];
 
 	if (optind != argc) {
-		fprintf(stderr, "ERROR: invalid arguments.\n");
+		error("unexpected agruments found");
 		usage(usage_str);
 	}
 
 	if (!*types && object && *object) {
 		ret = autodetect_object_types(*object, types);
 		if (ret < 0) {
-			fprintf(stderr,
-				"ERROR: failed to detect object type. %s\n",
+			error("failed to detect object type: %s",
 				strerror(-ret));
 			usage(usage_str);
 		}
 		if (!*types) {
-			fprintf(stderr,
-				"ERROR: object is not a btrfs object.\n");
+			error("object is not a btrfs object: %s", *object);
 			usage(usage_str);
 		}
 	}
 }
 
-static int cmd_get(int argc, char **argv)
+static const char * const cmd_property_get_usage[] = {
+	"btrfs property get [-t <type>] <object> [<name>]",
+	"Gets a property from a btrfs object.",
+	"If no name is specified, all properties for the given object are",
+	"printed.",
+	"A filesystem object can be a the filesystem itself, a subvolume,",
+	"an inode or a device. The '-t <type>' option can be used to explicitly",
+	"specify what type of object you meant. This is only needed when a",
+	"property could be set for more then one object type. Possible types",
+	"are s[ubvol], f[ilesystem], i[node] and d[evice].",
+	NULL
+};
+
+static int cmd_property_get(int argc, char **argv)
 {
 	int ret;
 	char *object = NULL;
@@ -402,12 +380,13 @@ static int cmd_get(int argc, char **argv)
 	int types = 0;
 
 	if (check_argc_min(argc, 2) || check_argc_max(argc, 5))
-		usage(cmd_get_usage);
+		usage(cmd_property_get_usage);
 
-	parse_args(argc, argv, cmd_get_usage, &types, &object, &name, NULL);
+	parse_args(argc, argv, cmd_property_get_usage, &types, &object, &name,
+			NULL);
 	if (!object) {
-		fprintf(stderr, "ERROR: invalid arguments.\n");
-		usage(cmd_set_usage);
+		error("invalid arguments");
+		usage(cmd_property_get_usage);
 	}
 
 	if (name)
@@ -418,7 +397,15 @@ static int cmd_get(int argc, char **argv)
 	return ret;
 }
 
-static int cmd_set(int argc, char **argv)
+static const char * const cmd_property_set_usage[] = {
+	"btrfs property set [-t <type>] <object> <name> <value>",
+	"Sets a property on a btrfs object.",
+	"Please see the help of 'btrfs property get' for a description of",
+	"objects and object types.",
+	NULL
+};
+
+static int cmd_property_set(int argc, char **argv)
 {
 	int ret;
 	char *object = NULL;
@@ -427,12 +414,13 @@ static int cmd_set(int argc, char **argv)
 	int types = 0;
 
 	if (check_argc_min(argc, 4) || check_argc_max(argc, 6))
-		usage(cmd_set_usage);
+		usage(cmd_property_set_usage);
 
-	parse_args(argc, argv, cmd_set_usage, &types, &object, &name, &value);
+	parse_args(argc, argv, cmd_property_set_usage, &types,
+			&object, &name, &value);
 	if (!object || !name || !value) {
-		fprintf(stderr, "ERROR: invalid arguments.\n");
-		usage(cmd_set_usage);
+		error("invalid arguments");
+		usage(cmd_property_set_usage);
 	}
 
 	ret = setget_prop(types, object, name, value);
@@ -440,19 +428,28 @@ static int cmd_set(int argc, char **argv)
 	return ret;
 }
 
-static int cmd_list(int argc, char **argv)
+static const char * const cmd_property_list_usage[] = {
+	"btrfs property list [-t <type>] <object>",
+	"Lists available properties with their descriptions for the given object.",
+	"Please see the help of 'btrfs property get' for a description of",
+	"objects and object types.",
+	NULL
+};
+
+static int cmd_property_list(int argc, char **argv)
 {
 	int ret;
 	char *object = NULL;
 	int types = 0;
 
 	if (check_argc_min(argc, 2) || check_argc_max(argc, 4))
-		usage(cmd_list_usage);
+		usage(cmd_property_list_usage);
 
-	parse_args(argc, argv, cmd_list_usage, &types, &object, NULL, NULL);
+	parse_args(argc, argv, cmd_property_list_usage,
+			&types, &object, NULL, NULL);
 	if (!object) {
-		fprintf(stderr, "ERROR: invalid arguments.\n");
-		usage(cmd_set_usage);
+		error("invalid arguments");
+		usage(cmd_property_list_usage);
 	}
 
 	ret = dump_props(types, object, 1);
@@ -460,12 +457,18 @@ static int cmd_list(int argc, char **argv)
 	return ret;
 }
 
+static const char property_cmd_group_info[] =
+"modify properties of filesystem objects";
+
 const struct cmd_group property_cmd_group = {
-	property_cmd_group_usage, NULL, {
-		{ "get", cmd_get, cmd_get_usage, NULL, 0 },
-		{ "set", cmd_set, cmd_set_usage, NULL, 0 },
-		{ "list", cmd_list, cmd_list_usage, NULL, 0 },
-		{ 0, 0, 0, 0, 0 },
+	property_cmd_group_usage, property_cmd_group_info, {
+		{ "get", cmd_property_get,
+			cmd_property_get_usage, NULL, 0 },
+		{ "set", cmd_property_set,
+			cmd_property_set_usage, NULL, 0 },
+		{ "list", cmd_property_list,
+			cmd_property_list_usage, NULL, 0 },
+		NULL_CMD_STRUCT
 	}
 };
 

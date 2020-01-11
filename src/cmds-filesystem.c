@@ -34,7 +34,7 @@
 #include "utils.h"
 #include "volumes.h"
 #include "commands.h"
-#include "cmds-fi-disk_usage.h"
+#include "cmds-fi-usage.h"
 #include "list_sort.h"
 #include "disk-io.h"
 
@@ -121,25 +121,16 @@ static const char * const filesystem_cmd_group_usage[] = {
 };
 
 static const char * const cmd_filesystem_df_usage[] = {
-       "btrfs filesystem df [options] <path>",
-       "Show space usage information for a mount point",
-	"-b|--raw           raw numbers in bytes",
-	"-h|--human-readable",
-	"                   human friendly numbers, base 1024 (default)",
-	"-H                 human friendly numbers, base 1000",
-	"--iec              use 1024 as a base (KiB, MiB, GiB, TiB)",
-	"--si               use 1000 as a base (kB, MB, GB, TB)",
-	"-k|--kbytes        show sizes in KiB, or kB with --si",
-	"-m|--mbytes        show sizes in MiB, or MB with --si",
-	"-g|--gbytes        show sizes in GiB, or GB with --si",
-	"-t|--tbytes        show sizes in TiB, or TB with --si",
-       NULL
+	"btrfs filesystem df [options] <path>",
+	"Show space usage information for a mount point",
+	HELPINFO_UNITS_SHORT_LONG,
+	NULL
 };
 
 static int get_df(int fd, struct btrfs_ioctl_space_args **sargs_ret)
 {
 	u64 count = 0;
-	int ret, e;
+	int ret;
 	struct btrfs_ioctl_space_args *sargs;
 
 	sargs = malloc(sizeof(struct btrfs_ioctl_space_args));
@@ -150,12 +141,10 @@ static int get_df(int fd, struct btrfs_ioctl_space_args **sargs_ret)
 	sargs->total_spaces = 0;
 
 	ret = ioctl(fd, BTRFS_IOC_SPACE_INFO, sargs);
-	e = errno;
-	if (ret) {
-		fprintf(stderr, "ERROR: couldn't get space info - %s\n",
-			strerror(e));
+	if (ret < 0) {
+		error("cannot get space info: %s\n", strerror(errno));
 		free(sargs);
-		return -e;
+		return -errno;
 	}
 	/* This really should never happen */
 	if (!sargs->total_spaces) {
@@ -173,12 +162,11 @@ static int get_df(int fd, struct btrfs_ioctl_space_args **sargs_ret)
 	sargs->space_slots = count;
 	sargs->total_spaces = 0;
 	ret = ioctl(fd, BTRFS_IOC_SPACE_INFO, sargs);
-	e = errno;
-	if (ret) {
-		fprintf(stderr, "ERROR: get space info count %llu - %s\n",
-				count, strerror(e));
+	if (ret < 0) {
+		error("cannot get space info with %llu slots: %s",
+				count, strerror(errno));
 		free(sargs);
-		return -e;
+		return -errno;
 	}
 	*sargs_ret = sargs;
 	return 0;
@@ -205,77 +193,26 @@ static int cmd_filesystem_df(int argc, char **argv)
 	int fd;
 	char *path;
 	DIR *dirstream = NULL;
-	unsigned unit_mode = UNITS_DEFAULT;
+	unsigned unit_mode;
 
-	while (1) {
-		int long_index;
-		static const struct option long_options[] = {
-			{ "raw", no_argument, NULL, 'b'},
-			{ "kbytes", no_argument, NULL, 'k'},
-			{ "mbytes", no_argument, NULL, 'm'},
-			{ "gbytes", no_argument, NULL, 'g'},
-			{ "tbytes", no_argument, NULL, 't'},
-			{ "si", no_argument, NULL, GETOPT_VAL_SI},
-			{ "iec", no_argument, NULL, GETOPT_VAL_IEC},
-			{ "human-readable", no_argument, NULL,
-				GETOPT_VAL_HUMAN_READABLE},
-			{ NULL, 0, NULL, 0 }
-		};
-		int c = getopt_long(argc, argv, "bhHkmgt", long_options,
-					&long_index);
-		if (c < 0)
-			break;
-		switch (c) {
-		case 'b':
-			unit_mode = UNITS_RAW;
-			break;
-		case 'k':
-			units_set_base(&unit_mode, UNITS_KBYTES);
-			break;
-		case 'm':
-			units_set_base(&unit_mode, UNITS_MBYTES);
-			break;
-		case 'g':
-			units_set_base(&unit_mode, UNITS_GBYTES);
-			break;
-		case 't':
-			units_set_base(&unit_mode, UNITS_TBYTES);
-			break;
-		case GETOPT_VAL_HUMAN_READABLE:
-		case 'h':
-			unit_mode = UNITS_HUMAN_BINARY;
-			break;
-		case 'H':
-			unit_mode = UNITS_HUMAN_DECIMAL;
-			break;
-		case GETOPT_VAL_SI:
-			units_set_mode(&unit_mode, UNITS_DECIMAL);
-			break;
-		case GETOPT_VAL_IEC:
-			units_set_mode(&unit_mode, UNITS_BINARY);
-			break;
-		default:
-			usage(cmd_filesystem_df_usage);
-		}
-	}
+	unit_mode = get_unit_mode_from_arg(&argc, argv, 1);
 
-	if (check_argc_exact(argc, optind + 1))
+	if (argc != 2 || argv[1][0] == '-')
 		usage(cmd_filesystem_df_usage);
 
-	path = argv[optind];
+	path = argv[1];
 
-	fd = open_file_or_dir(path, &dirstream);
-	if (fd < 0) {
-		fprintf(stderr, "ERROR: can't access '%s'\n", path);
+	fd = btrfs_open_dir(path, &dirstream, 1);
+	if (fd < 0)
 		return 1;
-	}
+
 	ret = get_df(fd, &sargs);
 
 	if (ret == 0) {
 		print_df(sargs, unit_mode);
 		free(sargs);
 	} else {
-		fprintf(stderr, "ERROR: get_df failed %s\n", strerror(-ret));
+		error("get_df failed %s", strerror(-ret));
 	}
 
 	close_file_or_dir(fd, dirstream);
@@ -293,7 +230,7 @@ static int match_search_item_kernel(__u8 *fsid, char *mnt, char *label,
 	if (!strncmp(uuidbuf, search, search_len))
 		return 1;
 
-	if (strlen(label) && strcmp(label, search) == 0)
+	if (*label && strcmp(label, search) == 0)
 		return 1;
 
 	if (strcmp(mnt, search) == 0)
@@ -375,7 +312,7 @@ static void splice_device_list(struct list_head *seed_devices,
 }
 
 static void print_devices(struct btrfs_fs_devices *fs_devices,
-			  u64 *devs_found)
+			  u64 *devs_found, unsigned unit_mode)
 {
 	struct btrfs_device *device;
 	struct btrfs_fs_devices *cur_fs;
@@ -393,14 +330,16 @@ static void print_devices(struct btrfs_fs_devices *fs_devices,
 	list_for_each_entry(device, all_devices, dev_list) {
 		printf("\tdevid %4llu size %s used %s path %s\n",
 		       (unsigned long long)device->devid,
-		       pretty_size(device->total_bytes),
-		       pretty_size(device->bytes_used), device->name);
+		       pretty_size_mode(device->total_bytes, unit_mode),
+		       pretty_size_mode(device->bytes_used, unit_mode),
+		       device->name);
 
 		(*devs_found)++;
 	}
 }
 
-static void print_one_uuid(struct btrfs_fs_devices *fs_devices)
+static void print_one_uuid(struct btrfs_fs_devices *fs_devices,
+			   unsigned unit_mode)
 {
 	char uuidbuf[BTRFS_UUID_UNPARSED_SIZE];
 	struct btrfs_device *device;
@@ -421,9 +360,9 @@ static void print_one_uuid(struct btrfs_fs_devices *fs_devices)
 	total = device->total_devs;
 	printf(" uuid: %s\n\tTotal devices %llu FS bytes used %s\n", uuidbuf,
 	       (unsigned long long)total,
-	       pretty_size(device->super_bytes_used));
+	       pretty_size_mode(device->super_bytes_used, unit_mode));
 
-	print_devices(fs_devices, &devs_found);
+	print_devices(fs_devices, &devs_found, unit_mode);
 
 	if (devs_found < total) {
 		printf("\t*** Some devices missing\n");
@@ -445,7 +384,7 @@ static u64 calc_used_bytes(struct btrfs_ioctl_space_args *si)
 static int print_one_fs(struct btrfs_ioctl_fs_info_args *fs_info,
 		struct btrfs_ioctl_dev_info_args *dev_info,
 		struct btrfs_ioctl_space_args *space_info,
-		char *label, char *path)
+		char *label, unsigned unit_mode)
 {
 	int i;
 	int fd;
@@ -461,14 +400,15 @@ static int print_one_fs(struct btrfs_ioctl_fs_info_args *fs_info,
 		return ret;
 
 	uuid_unparse(fs_info->fsid, uuidbuf);
-	if (label && strlen(label))
+	if (label && *label)
 		printf("Label: '%s' ", label);
 	else
 		printf("Label: none ");
 
 	printf(" uuid: %s\n\tTotal devices %llu FS bytes used %s\n", uuidbuf,
 			fs_info->num_devices,
-			pretty_size(calc_used_bytes(space_info)));
+			pretty_size_mode(calc_used_bytes(space_info),
+					 unit_mode));
 
 	for (i = 0; i < fs_info->num_devices; i++) {
 		char *canonical_path;
@@ -485,8 +425,8 @@ static int print_one_fs(struct btrfs_ioctl_fs_info_args *fs_info,
 		canonical_path = canonicalize_path((char *)tmp_dev_info->path);
 		printf("\tdevid %4llu size %s used %s path %s\n",
 			tmp_dev_info->devid,
-			pretty_size(tmp_dev_info->total_bytes),
-			pretty_size(tmp_dev_info->bytes_used),
+			pretty_size_mode(tmp_dev_info->total_bytes, unit_mode),
+			pretty_size_mode(tmp_dev_info->bytes_used, unit_mode),
 			canonical_path);
 
 		free(canonical_path);
@@ -498,7 +438,7 @@ static int print_one_fs(struct btrfs_ioctl_fs_info_args *fs_info,
 	return 0;
 }
 
-static int btrfs_scan_kernel(void *search)
+static int btrfs_scan_kernel(void *search, unsigned unit_mode)
 {
 	int ret = 0, fd;
 	int found = 0;
@@ -524,20 +464,31 @@ static int btrfs_scan_kernel(void *search)
 			goto out;
 		}
 
-		if (get_label_mounted(mnt->mnt_dir, label)) {
+		/* skip all fs already shown as mounted fs */
+		if (is_seen_fsid(fs_info_arg.fsid))
+			continue;
+
+		ret = get_label_mounted(mnt->mnt_dir, label);
+		/* provide backward kernel compatibility */
+		if (ret == -ENOTTY)
+			ret = get_label_unmounted(
+				(const char *)dev_info_arg->path, label);
+
+		if (ret) {
 			kfree(dev_info_arg);
 			goto out;
 		}
 		if (search && !match_search_item_kernel(fs_info_arg.fsid,
 					mnt->mnt_dir, label, search)) {
 			kfree(dev_info_arg);
+			dev_info_arg = NULL;
 			continue;
 		}
 
 		fd = open(mnt->mnt_dir, O_RDONLY);
 		if ((fd != -1) && !get_df(fd, &space_info_arg)) {
 			print_one_fs(&fs_info_arg, dev_info_arg,
-					space_info_arg, label, mnt->mnt_dir);
+				     space_info_arg, label, unit_mode);
 			kfree(space_info_arg);
 			memset(label, 0, sizeof(label));
 			found = 1;
@@ -545,6 +496,7 @@ static int btrfs_scan_kernel(void *search)
 		if (fd != -1)
 			close(fd);
 		kfree(dev_info_arg);
+		dev_info_arg = NULL;
 	}
 
 out:
@@ -555,18 +507,13 @@ out:
 static int dev_to_fsid(char *dev, __u8 *fsid)
 {
 	struct btrfs_super_block *disk_super;
-	char *buf;
+	char buf[BTRFS_SUPER_INFO_SIZE];
 	int ret;
 	int fd;
-
-	buf = malloc(4096);
-	if (!buf)
-		return -ENOMEM;
 
 	fd = open(dev, O_RDONLY);
 	if (fd < 0) {
 		ret = -errno;
-		free(buf);
 		return ret;
 	}
 
@@ -581,7 +528,6 @@ static int dev_to_fsid(char *dev, __u8 *fsid)
 
 out:
 	close(fd);
-	free(buf);
 	return ret;
 }
 
@@ -728,7 +674,7 @@ static int search_umounted_fs_uuids(struct list_head *all_uuids,
 		if (is_seen_fsid(cur_fs->fsid))
 			continue;
 
-		fs_copy = malloc(sizeof(*fs_copy));
+		fs_copy = calloc(1, sizeof(*fs_copy));
 		if (!fs_copy) {
 			ret = -ENOMEM;
 			goto out;
@@ -811,16 +757,17 @@ fail_out:
 	goto out;
 }
 
-static const char * const cmd_show_usage[] = {
+static const char * const cmd_filesystem_show_usage[] = {
 	"btrfs filesystem show [options] [<path>|<uuid>|<device>|label]",
 	"Show the structure of a filesystem",
 	"-d|--all-devices   show only disks under /dev containing btrfs filesystem",
 	"-m|--mounted       show only mounted btrfs",
+	HELPINFO_UNITS_LONG,
 	"If no argument is given, structure of all present filesystems is shown.",
 	NULL
 };
 
-static int cmd_show(int argc, char **argv)
+static int cmd_filesystem_show(int argc, char **argv)
 {
 	LIST_HEAD(all_uuids);
 	struct btrfs_fs_devices *fs_devices;
@@ -829,21 +776,24 @@ static int cmd_show(int argc, char **argv)
 	/* default, search both kernel and udev */
 	int where = -1;
 	int type = 0;
-	char mp[BTRFS_PATH_NAME_MAX + 1];
+	char mp[PATH_MAX];
 	char path[PATH_MAX];
 	__u8 fsid[BTRFS_FSID_SIZE];
 	char uuid_buf[BTRFS_UUID_UNPARSED_SIZE];
+	unsigned unit_mode;
 	int found = 0;
 
+	unit_mode = get_unit_mode_from_arg(&argc, argv, 0);
+
 	while (1) {
-		int long_index;
+		int c;
 		static const struct option long_options[] = {
 			{ "all-devices", no_argument, NULL, 'd'},
 			{ "mounted", no_argument, NULL, 'm'},
 			{ NULL, 0, NULL, 0 }
 		};
-		int c = getopt_long(argc, argv, "dm", long_options,
-					&long_index);
+
+		c = getopt_long(argc, argv, "dm", long_options, NULL);
 		if (c < 0)
 			break;
 		switch (c) {
@@ -854,17 +804,17 @@ static int cmd_show(int argc, char **argv)
 			where = BTRFS_SCAN_MOUNTED;
 			break;
 		default:
-			usage(cmd_show_usage);
+			usage(cmd_filesystem_show_usage);
 		}
 	}
 
 	if (check_argc_max(argc, optind + 1))
-		usage(cmd_show_usage);
+		usage(cmd_filesystem_show_usage);
 
 	if (argc > optind) {
 		search = argv[optind];
-		if (strlen(search) == 0)
-			usage(cmd_show_usage);
+		if (*search == 0)
+			usage(cmd_filesystem_show_usage);
 		type = check_arg_type(search);
 
 		/*
@@ -891,9 +841,7 @@ static int cmd_show(int argc, char **argv)
 			} else {
 				ret = dev_to_fsid(search, fsid);
 				if (ret) {
-					fprintf(stderr,
-						"ERROR: No btrfs on %s\n",
-						search);
+					error("no btrfs on %s", search);
 					return 1;
 				}
 				uuid_unparse(fsid, uuid_buf);
@@ -908,7 +856,7 @@ static int cmd_show(int argc, char **argv)
 		goto devs_only;
 
 	/* show mounted btrfs */
-	ret = btrfs_scan_kernel(search);
+	ret = btrfs_scan_kernel(search, unit_mode);
 	if (search && !ret) {
 		/* since search is found we are done */
 		goto out;
@@ -922,14 +870,13 @@ devs_only:
 	ret = btrfs_scan_lblkid();
 
 	if (ret) {
-		fprintf(stderr, "ERROR: %d while scanning\n", ret);
+		error("blkid device scan returned %d\n", ret);
 		return 1;
 	}
 
 	ret = search_umounted_fs_uuids(&all_uuids, search, &found);
 	if (ret < 0) {
-		fprintf(stderr,
-			"ERROR: %d while searching target device\n", ret);
+		error("searching target device returned error %d", ret);
 		return 1;
 	}
 
@@ -939,13 +886,12 @@ devs_only:
 	 */
 	ret = map_seed_devices(&all_uuids);
 	if (ret) {
-		fprintf(stderr,
-			"ERROR: %d while mapping seed devices\n", ret);
+		error("mapping seed devices returned error %d", ret);
 		return 1;
 	}
 
 	list_for_each_entry(fs_devices, &all_uuids, list)
-		print_one_uuid(fs_devices);
+		print_one_uuid(fs_devices, unit_mode);
 
 	if (search && !found)
 		ret = 1;
@@ -956,41 +902,37 @@ devs_only:
 		free_fs_devices(fs_devices);
 	}
 out:
-	printf("%s\n", PACKAGE_STRING);
 	free_seen_fsid();
 	return ret;
 }
 
-static const char * const cmd_sync_usage[] = {
+static const char * const cmd_filesystem_sync_usage[] = {
 	"btrfs filesystem sync <path>",
 	"Force a sync on a filesystem",
 	NULL
 };
 
-static int cmd_sync(int argc, char **argv)
+static int cmd_filesystem_sync(int argc, char **argv)
 {
 	int 	fd, res, e;
 	char	*path;
 	DIR	*dirstream = NULL;
 
 	if (check_argc_exact(argc, 2))
-		usage(cmd_sync_usage);
+		usage(cmd_filesystem_sync_usage);
 
 	path = argv[1];
 
-	fd = open_file_or_dir(path, &dirstream);
-	if (fd < 0) {
-		fprintf(stderr, "ERROR: can't access '%s'\n", path);
+	fd = btrfs_open_dir(path, &dirstream, 1);
+	if (fd < 0)
 		return 1;
-	}
 
 	printf("FSSync '%s'\n", path);
 	res = ioctl(fd, BTRFS_IOC_SYNC);
 	e = errno;
 	close_file_or_dir(fd, dirstream);
 	if( res < 0 ){
-		fprintf(stderr, "ERROR: unable to fs-syncing '%s' - %s\n", 
-			path, strerror(e));
+		error("sync ioctl failed on '%s': %s", path, strerror(e));
 		return 1;
 	}
 
@@ -1004,12 +946,12 @@ static int parse_compress_type(char *s)
 	else if (strcmp(optarg, "lzo") == 0)
 		return BTRFS_COMPRESS_LZO;
 	else {
-		fprintf(stderr, "Unknown compress type %s\n", s);
+		error("unknown compression type %s", s);
 		exit(1);
 	};
 }
 
-static const char * const cmd_defrag_usage[] = {
+static const char * const cmd_filesystem_defrag_usage[] = {
 	"btrfs filesystem defragment [options] <file>|<dir> [<file>|<dir>...]",
 	"Defragment a file or a directory",
 	"",
@@ -1019,7 +961,7 @@ static const char * const cmd_defrag_usage[] = {
 	"-f             flush data to disk immediately after defragmenting",
 	"-s start       defragment only from byte onward",
 	"-l len         defragment only up to len bytes",
-	"-t size        minimal size of file to be considered for defragmenting",
+	"-t size        target extent size hint",
 	NULL
 };
 
@@ -1051,16 +993,15 @@ static int defrag_callback(const char *fpath, const struct stat *sb,
 		if (defrag_global_verbose)
 			printf("%s\n", fpath);
 		fd = open(fpath, O_RDWR);
-		e = errno;
 		if (fd < 0)
 			goto error;
 		ret = do_defrag(fd, defrag_global_fancy_ioctl, &defrag_global_range);
 		e = errno;
 		close(fd);
 		if (ret && e == ENOTTY && defrag_global_fancy_ioctl) {
-			fprintf(stderr, "ERROR: defrag range ioctl not "
+			error("defrag range ioctl not "
 				"supported in this kernel, please try "
-				"without any options.\n");
+				"without any options.");
 			defrag_global_errors++;
 			return ENOTTY;
 		}
@@ -1070,22 +1011,21 @@ static int defrag_callback(const char *fpath, const struct stat *sb,
 	return 0;
 
 error:
-	fprintf(stderr, "ERROR: defrag failed on %s - %s\n", fpath, strerror(e));
+	error("defrag failed on %s: %s", fpath, strerror(e));
 	defrag_global_errors++;
 	return 0;
 }
 
-static int cmd_defrag(int argc, char **argv)
+static int cmd_filesystem_defrag(int argc, char **argv)
 {
 	int fd;
 	int flush = 0;
 	u64 start = 0;
 	u64 len = (u64)-1;
-	u32 thresh = 0;
+	u64 thresh = 0;
 	int i;
 	int recursive = 0;
 	int ret = 0;
-	struct btrfs_ioctl_defrag_range_args range;
 	int e = 0;
 	int compress_type = BTRFS_COMPRESS_NONE;
 	DIR *dirstream;
@@ -1124,23 +1064,29 @@ static int cmd_defrag(int argc, char **argv)
 			break;
 		case 't':
 			thresh = parse_size(optarg);
+			if (thresh > (u32)-1) {
+				warning(
+			    "target extent size %llu too big, trimmed to %u",
+					thresh, (u32)-1);
+				thresh = (u32)-1;
+			}
 			defrag_global_fancy_ioctl = 1;
 			break;
 		case 'r':
 			recursive = 1;
 			break;
 		default:
-			usage(cmd_defrag_usage);
+			usage(cmd_filesystem_defrag_usage);
 		}
 	}
 
 	if (check_argc_min(argc - optind, 1))
-		usage(cmd_defrag_usage);
+		usage(cmd_filesystem_defrag_usage);
 
-	memset(&defrag_global_range, 0, sizeof(range));
+	memset(&defrag_global_range, 0, sizeof(defrag_global_range));
 	defrag_global_range.start = start;
 	defrag_global_range.len = len;
-	defrag_global_range.extent_thresh = thresh;
+	defrag_global_range.extent_thresh = (u32)thresh;
 	if (compress_type) {
 		defrag_global_range.flags |= BTRFS_DEFRAG_RANGE_COMPRESS;
 		defrag_global_range.compress_type = compress_type;
@@ -1154,23 +1100,22 @@ static int cmd_defrag(int argc, char **argv)
 		dirstream = NULL;
 		fd = open_file_or_dir(argv[i], &dirstream);
 		if (fd < 0) {
-			fprintf(stderr, "ERROR: failed to open %s - %s\n", argv[i],
+			error("cannot open %s: %s\n", argv[i],
 					strerror(errno));
 			defrag_global_errors++;
 			close_file_or_dir(fd, dirstream);
 			continue;
 		}
 		if (fstat(fd, &st)) {
-			fprintf(stderr, "ERROR: failed to stat %s - %s\n",
+			error("failed to stat %s: %s",
 					argv[i], strerror(errno));
 			defrag_global_errors++;
 			close_file_or_dir(fd, dirstream);
 			continue;
 		}
 		if (!(S_ISDIR(st.st_mode) || S_ISREG(st.st_mode))) {
-			fprintf(stderr,
-			    "ERROR: %s is not a directory or a regular file\n",
-			    argv[i]);
+			error("%s is not a directory or a regular file\n",
+					argv[i]);
 			defrag_global_errors++;
 			close_file_or_dir(fd, dirstream);
 			continue;
@@ -1199,27 +1144,24 @@ static int cmd_defrag(int argc, char **argv)
 		}
 		close_file_or_dir(fd, dirstream);
 		if (ret && e == ENOTTY && defrag_global_fancy_ioctl) {
-			fprintf(stderr, "ERROR: defrag range ioctl not "
+			error("defrag range ioctl not "
 				"supported in this kernel, please try "
-				"without any options.\n");
+				"without any options.");
 			defrag_global_errors++;
 			break;
 		}
 		if (ret) {
-			fprintf(stderr, "ERROR: defrag failed on %s - %s\n",
-				argv[i], strerror(e));
+			error("defrag failed on %s: %s", argv[i], strerror(e));
 			defrag_global_errors++;
 		}
 	}
-	if (defrag_global_verbose)
-		printf("%s\n", PACKAGE_STRING);
 	if (defrag_global_errors)
 		fprintf(stderr, "total %d failures\n", defrag_global_errors);
 
 	return !!defrag_global_errors;
 }
 
-static const char * const cmd_resize_usage[] = {
+static const char * const cmd_filesystem_resize_usage[] = {
 	"btrfs filesystem resize [devid:][+/-]<newsize>[kKmMgGtTpPeE]|[devid:]max <path>",
 	"Resize a filesystem",
 	"If 'max' is passed, the filesystem will occupy all available space",
@@ -1228,46 +1170,74 @@ static const char * const cmd_resize_usage[] = {
 	NULL
 };
 
-static int cmd_resize(int argc, char **argv)
+static int cmd_filesystem_resize(int argc, char **argv)
 {
 	struct btrfs_ioctl_vol_args	args;
 	int	fd, res, len, e;
 	char	*amount, *path;
 	DIR	*dirstream = NULL;
+	struct stat st;
 
 	if (check_argc_exact(argc, 3))
-		usage(cmd_resize_usage);
+		usage(cmd_filesystem_resize_usage);
 
 	amount = argv[1];
 	path = argv[2];
 
 	len = strlen(amount);
 	if (len == 0 || len >= BTRFS_VOL_NAME_MAX) {
-		fprintf(stderr, "ERROR: size value too long ('%s)\n",
-			amount);
+		error("resize value too long (%s)", amount);
 		return 1;
 	}
 
-	fd = open_file_or_dir(path, &dirstream);
-	if (fd < 0) {
-		fprintf(stderr, "ERROR: can't access '%s'\n", path);
+	res = stat(path, &st);
+	if (res < 0) {
+		error("resize: cannot stat %s: %s", path, strerror(errno));
 		return 1;
 	}
+	if (!S_ISDIR(st.st_mode)) {
+		error("resize works on mounted filesystems and accepts only\n"
+			"directories as argument. Passing file containing a btrfs image\n"
+			"would resize the underlying filesystem instead of the image.\n");
+		return 1;
+	}
+
+	fd = btrfs_open_dir(path, &dirstream, 1);
+	if (fd < 0)
+		return 1;
 
 	printf("Resize '%s' of '%s'\n", path, amount);
+	memset(&args, 0, sizeof(args));
 	strncpy_null(args.name, amount);
 	res = ioctl(fd, BTRFS_IOC_RESIZE, &args);
 	e = errno;
 	close_file_or_dir(fd, dirstream);
 	if( res < 0 ){
-		fprintf(stderr, "ERROR: unable to resize '%s' - %s\n", 
-			path, strerror(e));
+		switch (e) {
+		case EFBIG:
+			error("unable to resize '%s': no enough free space",
+				path);
+			break;
+		default:
+			error("unable to resize '%s': %s", path, strerror(e));
+			break;
+		}
+		return 1;
+	} else if (res > 0) {
+		const char *err_str = btrfs_err_str(res);
+
+		if (err_str) {
+			error("resizing of '%s' failed: %s", path, err_str);
+		} else {
+			error("resizing of '%s' failed: unknown error %d",
+				path, res);
+		}
 		return 1;
 	}
 	return 0;
 }
 
-static const char * const cmd_label_usage[] = {
+static const char * const cmd_filesystem_label_usage[] = {
 	"btrfs filesystem label [<device>|<mount_point>] [<newlabel>]",
 	"Get or change the label of a filesystem",
 	"With one argument, get the label of filesystem on <device>.",
@@ -1275,10 +1245,10 @@ static const char * const cmd_label_usage[] = {
 	NULL
 };
 
-static int cmd_label(int argc, char **argv)
+static int cmd_filesystem_label(int argc, char **argv)
 {
 	if (check_argc_min(argc, 2) || check_argc_max(argc, 3))
-		usage(cmd_label_usage);
+		usage(cmd_filesystem_label_usage);
 
 	if (argc > 2) {
 		return set_label(argv[1], argv[2]);
@@ -1294,15 +1264,24 @@ static int cmd_label(int argc, char **argv)
 	}
 }
 
+static const char filesystem_cmd_group_info[] =
+"overall filesystem tasks and information";
+
 const struct cmd_group filesystem_cmd_group = {
-	filesystem_cmd_group_usage, NULL, {
+	filesystem_cmd_group_usage, filesystem_cmd_group_info, {
 		{ "df", cmd_filesystem_df, cmd_filesystem_df_usage, NULL, 0 },
-		{ "show", cmd_show, cmd_show_usage, NULL, 0 },
-		{ "sync", cmd_sync, cmd_sync_usage, NULL, 0 },
-		{ "defragment", cmd_defrag, cmd_defrag_usage, NULL, 0 },
-		{ "balance", cmd_balance, NULL, &balance_cmd_group, 1 },
-		{ "resize", cmd_resize, cmd_resize_usage, NULL, 0 },
-		{ "label", cmd_label, cmd_label_usage, NULL, 0 },
+		{ "show", cmd_filesystem_show, cmd_filesystem_show_usage, NULL,
+			0 },
+		{ "sync", cmd_filesystem_sync, cmd_filesystem_sync_usage, NULL,
+			0 },
+		{ "defragment", cmd_filesystem_defrag,
+			cmd_filesystem_defrag_usage, NULL, 0 },
+		{ "balance", cmd_balance, NULL, &balance_cmd_group,
+			CMD_HIDDEN },
+		{ "resize", cmd_filesystem_resize, cmd_filesystem_resize_usage,
+			NULL, 0 },
+		{ "label", cmd_filesystem_label, cmd_filesystem_label_usage,
+			NULL, 0 },
 		{ "usage", cmd_filesystem_usage,
 			cmd_filesystem_usage_usage, NULL, 0 },
 

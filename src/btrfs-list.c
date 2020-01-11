@@ -18,7 +18,6 @@
 
 #include <sys/ioctl.h>
 #include <sys/mount.h>
-#include "ioctl.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/types.h>
@@ -30,6 +29,7 @@
 #include "ctree.h"
 #include "transaction.h"
 #include "utils.h"
+#include "ioctl.h"
 #include <uuid/uuid.h>
 #include "btrfs-list.h"
 #include "rbtree-utils.h"
@@ -226,13 +226,12 @@ struct btrfs_list_comparer_set *btrfs_list_alloc_comparer_set(void)
 
 	size = sizeof(struct btrfs_list_comparer_set) +
 	       BTRFS_LIST_NCOMPS_INCREASE * sizeof(struct btrfs_list_comparer);
-	set = malloc(size);
+	set = calloc(1, size);
 	if (!set) {
 		fprintf(stderr, "memory allocation failed\n");
 		exit(1);
 	}
 
-	memset(set, 0, size);
 	set->total = BTRFS_LIST_NCOMPS_INCREASE;
 
 	return set;
@@ -254,11 +253,15 @@ static int btrfs_list_setup_comparer(struct btrfs_list_comparer_set **comp_set,
 	BUG_ON(set->ncomps > set->total);
 
 	if (set->ncomps == set->total) {
+		void *tmp;
+
 		size = set->total + BTRFS_LIST_NCOMPS_INCREASE;
 		size = sizeof(*set) + size * sizeof(struct btrfs_list_comparer);
+		tmp = set;
 		set = realloc(set, size);
 		if (!set) {
 			fprintf(stderr, "memory allocation failed\n");
+			free(tmp);
 			exit(1);
 		}
 
@@ -470,12 +473,11 @@ static int add_root(struct root_lookup *root_lookup,
 	if (!ret)
 		return 0;
 
-	ri = malloc(sizeof(*ri));
+	ri = calloc(1, sizeof(*ri));
 	if (!ri) {
 		printf("memory allocation failed\n");
 		exit(1);
 	}
-	memset(ri, 0, sizeof(*ri));
 	ri->root_id = root_id;
 
 	if (name && name_len > 0) {
@@ -628,7 +630,7 @@ static int resolve_root(struct root_lookup *rl, struct root_info *ri,
 static int lookup_ino_path(int fd, struct root_info *ri)
 {
 	struct btrfs_ioctl_ino_lookup_args args;
-	int ret, e;
+	int ret;
 
 	if (ri->path)
 		return 0;
@@ -641,15 +643,14 @@ static int lookup_ino_path(int fd, struct root_info *ri)
 	args.objectid = ri->dir_id;
 
 	ret = ioctl(fd, BTRFS_IOC_INO_LOOKUP, &args);
-	e = errno;
-	if (ret) {
-		if (e == ENOENT) {
+	if (ret < 0) {
+		if (errno == ENOENT) {
 			ri->ref_tree = 0;
 			return -ENOENT;
 		}
 		fprintf(stderr, "ERROR: Failed to lookup path for root %llu - %s\n",
 			(unsigned long long)ri->ref_tree,
-			strerror(e));
+			strerror(errno));
 		return ret;
 	}
 
@@ -692,18 +693,16 @@ static u64 find_root_gen(int fd)
 	unsigned long off = 0;
 	u64 max_found = 0;
 	int i;
-	int e;
 
 	memset(&ino_args, 0, sizeof(ino_args));
 	ino_args.objectid = BTRFS_FIRST_FREE_OBJECTID;
 
 	/* this ioctl fills in ino_args->treeid */
 	ret = ioctl(fd, BTRFS_IOC_INO_LOOKUP, &ino_args);
-	e = errno;
-	if (ret) {
+	if (ret < 0) {
 		fprintf(stderr, "ERROR: Failed to lookup path for dirid %llu - %s\n",
 			(unsigned long long)BTRFS_FIRST_FREE_OBJECTID,
-			strerror(e));
+			strerror(errno));
 		return 0;
 	}
 
@@ -726,10 +725,9 @@ static u64 find_root_gen(int fd)
 
 	while (1) {
 		ret = ioctl(fd, BTRFS_IOC_TREE_SEARCH, &args);
-		e = errno;
 		if (ret < 0) {
 			fprintf(stderr, "ERROR: can't perform the search - %s\n",
-				strerror(e));
+				strerror(errno));
 			return 0;
 		}
 		/* the ioctl returns the number of item it found in nr_items */
@@ -783,16 +781,14 @@ static char *__ino_resolve(int fd, u64 dirid)
 	struct btrfs_ioctl_ino_lookup_args args;
 	int ret;
 	char *full;
-	int e;
 
 	memset(&args, 0, sizeof(args));
 	args.objectid = dirid;
 
 	ret = ioctl(fd, BTRFS_IOC_INO_LOOKUP, &args);
-	e = errno;
-	if (ret) {
+	if (ret < 0) {
 		fprintf(stderr, "ERROR: Failed to lookup path for dirid %llu - %s\n",
-			(unsigned long long)dirid, strerror(e) );
+			(unsigned long long)dirid, strerror(errno));
 		return ERR_PTR(ret);
 	}
 
@@ -850,7 +846,6 @@ static char *ino_resolve(int fd, u64 ino, u64 *cache_dirid, char **cache_name)
 	struct btrfs_ioctl_search_header *sh;
 	unsigned long off = 0;
 	int namelen;
-	int e;
 
 	memset(&args, 0, sizeof(args));
 
@@ -869,10 +864,9 @@ static char *ino_resolve(int fd, u64 ino, u64 *cache_dirid, char **cache_name)
 	sk->nr_items = 1;
 
 	ret = ioctl(fd, BTRFS_IOC_TREE_SEARCH, &args);
-	e = errno;
 	if (ret < 0) {
 		fprintf(stderr, "ERROR: can't perform the search - %s\n",
-			strerror(e));
+			strerror(errno));
 		return NULL;
 	}
 	/* the ioctl returns the number of item it found in nr_items */
@@ -1204,13 +1198,12 @@ struct btrfs_list_filter_set *btrfs_list_alloc_filter_set(void)
 
 	size = sizeof(struct btrfs_list_filter_set) +
 	       BTRFS_LIST_NFILTERS_INCREASE * sizeof(struct btrfs_list_filter);
-	set = malloc(size);
+	set = calloc(1, size);
 	if (!set) {
 		fprintf(stderr, "memory allocation failed\n");
 		exit(1);
 	}
 
-	memset(set, 0, size);
 	set->total = BTRFS_LIST_NFILTERS_INCREASE;
 
 	return set;
@@ -1232,11 +1225,15 @@ int btrfs_list_setup_filter(struct btrfs_list_filter_set **filter_set,
 	BUG_ON(set->nfilters > set->total);
 
 	if (set->nfilters == set->total) {
+		void *tmp;
+
 		size = set->total + BTRFS_LIST_NFILTERS_INCREASE;
 		size = sizeof(*set) + size * sizeof(struct btrfs_list_filter);
+		tmp = set;
 		set = realloc(set, size);
 		if (!set) {
 			fprintf(stderr, "memory allocation failed\n");
+			free(tmp);
 			exit(1);
 		}
 
@@ -1681,7 +1678,6 @@ int btrfs_list_find_updated_files(int fd, u64 root_id, u64 oldest_gen)
 	u64 found_gen;
 	u64 max_found = 0;
 	int i;
-	int e;
 	u64 cache_dirid = 0;
 	u64 cache_ino = 0;
 	char *cache_dir_name = NULL;
@@ -1708,10 +1704,9 @@ int btrfs_list_find_updated_files(int fd, u64 root_id, u64 oldest_gen)
 	max_found = find_root_gen(fd);
 	while(1) {
 		ret = ioctl(fd, BTRFS_IOC_TREE_SEARCH, &args);
-		e = errno;
 		if (ret < 0) {
 			fprintf(stderr, "ERROR: can't perform the search - %s\n",
-				strerror(e));
+				strerror(errno));
 			break;
 		}
 		/* the ioctl returns the number of item it found in nr_items */

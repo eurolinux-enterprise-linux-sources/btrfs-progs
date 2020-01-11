@@ -16,6 +16,9 @@
  * Boston, MA 021110-1307, USA.
  */
 
+#include "kerncompat.h"
+#include "androidcompat.h"
+
 #include <stdio.h>
 #include <stdio_ext.h>
 #include <stdlib.h>
@@ -26,7 +29,6 @@
 #include <uuid/uuid.h>
 #include <pthread.h>
 
-#include "kerncompat.h"
 #include "list.h"
 #include "radix-tree.h"
 #include "ctree.h"
@@ -76,19 +78,19 @@ struct device_scan {
 	struct recover_control *rc;
 	struct btrfs_device *dev;
 	int fd;
+	u64 bytenr;
 };
 
 static struct extent_record *btrfs_new_extent_record(struct extent_buffer *eb)
 {
 	struct extent_record *rec;
 
-	rec = malloc(sizeof(*rec));
+	rec = calloc(1, sizeof(*rec));
 	if (!rec) {
 		fprintf(stderr, "Fail to allocate memory for extent record.\n");
 		exit(1);
 	}
 
-	memset(rec, 0, sizeof(*rec));
 	rec->cache.start = btrfs_header_bytenr(eb);
 	rec->cache.size = eb->len;
 	rec->generation = btrfs_header_generation(eb);
@@ -258,7 +260,7 @@ again:
 		list_del_init(&exist->list);
 		free(exist);
 		/*
-		 * We must do seach again to avoid the following cache.
+		 * We must do search again to avoid the following cache.
 		 * /--old bg 1--//--old bg 2--/
 		 *        /--new bg--/
 		 */
@@ -766,6 +768,8 @@ static int scan_one_device(void *dev_scan_struct)
 
 	bytenr = 0;
 	while (1) {
+		dev_scan->bytenr = bytenr;
+
 		if (is_super_block_address(bytenr))
 			bytenr += rc->sectorsize;
 
@@ -829,12 +833,11 @@ static int scan_devices(struct recover_control *rc)
 	struct btrfs_device *dev;
 	struct device_scan *dev_scans;
 	pthread_t *t_scans;
-	int *t_rets;
+	long *t_rets;
 	int devnr = 0;
 	int devidx = 0;
-	int cancel_from = 0;
-	int cancel_to = 0;
 	int i;
+	int all_done;
 
 	list_for_each_entry(dev, &rc->fs_devices->devices, dev_list)
 		devnr++;
@@ -843,11 +846,16 @@ static int scan_devices(struct recover_control *rc)
 	if (!dev_scans)
 		return -ENOMEM;
 	t_scans = (pthread_t *)malloc(sizeof(pthread_t) * devnr);
-	if (!t_scans)
+	if (!t_scans) {
+		free(dev_scans);
 		return -ENOMEM;
-	t_rets = (int *)malloc(sizeof(int) * devnr);
-	if (!t_rets)
+	}
+	t_rets = (long *)malloc(sizeof(long) * devnr);
+	if (!t_rets) {
+		free(dev_scans);
+		free(t_scans);
 		return -ENOMEM;
+	}
 
 	list_for_each_entry(dev, &rc->fs_devices->devices, dev_list) {
 		fd = open(dev->name, O_RDONLY);
@@ -860,32 +868,64 @@ static int scan_devices(struct recover_control *rc)
 		dev_scans[devidx].rc = rc;
 		dev_scans[devidx].dev = dev;
 		dev_scans[devidx].fd = fd;
-		ret = pthread_create(&t_scans[devidx], NULL,
-				     (void *)scan_one_device,
-				     (void *)&dev_scans[devidx]);
-		if (ret) {
-			cancel_from = 0;
-			cancel_to = devidx - 1;
-			goto out1;
-		}
+		dev_scans[devidx].bytenr = -1;
 		devidx++;
 	}
 
-	i = 0;
-	while (i < devidx) {
-		ret = pthread_join(t_scans[i], (void **)&t_rets[i]);
-		if (ret || t_rets[i]) {
-			ret = 1;
-			cancel_from = i + 1;
-			cancel_to = devnr - 1;
+	for (i = 0; i < devidx; i++) {
+		ret = pthread_create(&t_scans[i], NULL,
+				     (void *)scan_one_device,
+				     (void *)&dev_scans[i]);
+		if (ret)
 			goto out1;
+
+		dev_scans[i].bytenr = 0;
+	}
+
+	while (1) {
+		all_done = 1;
+		for (i = 0; i < devidx; i++) {
+			if (dev_scans[i].bytenr == -1)
+				continue;
+			ret = pthread_tryjoin_np(t_scans[i],
+						 (void **)&t_rets[i]);
+			if (ret == EBUSY) {
+				all_done = 0;
+				continue;
+			}
+			if (ret || t_rets[i]) {
+				ret = 1;
+				goto out1;
+			}
+			dev_scans[i].bytenr = -1;
 		}
-		i++;
+
+		printf("\rScanning: ");
+		for (i = 0; i < devidx; i++) {
+			if (dev_scans[i].bytenr == -1)
+				printf("%sDONE in dev%d",
+				       i ? ", " : "", i);
+			else
+				printf("%s%llu in dev%d",
+				       i ? ", " : "", dev_scans[i].bytenr, i);
+		}
+		/* clear chars if exist in tail */
+		printf("                ");
+		printf("\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b");
+		fflush(stdout);
+
+		if (all_done) {
+			printf("\n");
+			break;
+		}
+
+		sleep(1);
 	}
 out1:
-	while (ret && (cancel_from <= cancel_to)) {
-		pthread_cancel(t_scans[cancel_from]);
-		cancel_from++;
+	for (i = 0; i < devidx; i++) {
+		if (dev_scans[i].bytenr == -1)
+			continue;
+		pthread_cancel(t_scans[i]);
 	}
 out2:
 	free(dev_scans);
@@ -1058,8 +1098,7 @@ err:
 	return ret;
 }
 
-static int block_group_free_all_extent(struct btrfs_trans_handle *trans,
-				       struct btrfs_root *root,
+static int block_group_free_all_extent(struct btrfs_root *root,
 				       struct block_group_record *bg)
 {
 	struct btrfs_block_group_cache *cache;
@@ -1099,7 +1138,7 @@ static int remove_chunk_extent_item(struct btrfs_trans_handle *trans,
 		if (ret)
 			return ret;
 
-		ret = block_group_free_all_extent(trans, root, chunk->bg_rec);
+		ret = block_group_free_all_extent(root, chunk->bg_rec);
 		if (ret)
 			return ret;
 	}
@@ -1120,9 +1159,9 @@ static int __rebuild_chunk_root(struct btrfs_trans_handle *trans,
 		if (min_devid > dev->devid)
 			min_devid = dev->devid;
 	}
-	disk_key.objectid = BTRFS_DEV_ITEMS_OBJECTID;
-	disk_key.type = BTRFS_DEV_ITEM_KEY;
-	disk_key.offset = min_devid;
+	btrfs_set_disk_key_objectid(&disk_key, BTRFS_DEV_ITEMS_OBJECTID);
+	btrfs_set_disk_key_type(&disk_key, BTRFS_DEV_ITEM_KEY);
+	btrfs_set_disk_key_offset(&disk_key, min_devid);
 
 	cow = btrfs_alloc_free_block(trans, root, root->nodesize,
 				     BTRFS_CHUNK_TREE_OBJECTID,
@@ -1152,12 +1191,9 @@ static int __rebuild_device_items(struct btrfs_trans_handle *trans,
 {
 	struct btrfs_device *dev;
 	struct btrfs_key key;
-	struct btrfs_dev_item *dev_item;
+	struct btrfs_dev_item dev_item_tmp;
+	struct btrfs_dev_item *dev_item = &dev_item_tmp;
 	int ret = 0;
-
-	dev_item = malloc(sizeof(struct btrfs_dev_item));
-	if (!dev_item)
-		return -ENOMEM;
 
 	list_for_each_entry(dev, &rc->fs_devices->devices, dev_list) {
 		key.objectid = BTRFS_DEV_ITEMS_OBJECTID;
@@ -1179,7 +1215,6 @@ static int __rebuild_device_items(struct btrfs_trans_handle *trans,
 					dev_item, sizeof(*dev_item));
 	}
 
-	free(dev_item);
 	return ret;
 }
 
@@ -1199,7 +1234,7 @@ static int __insert_chunk_item(struct btrfs_trans_handle *trans,
 	key.offset = chunk_rec->offset;
 
 	ret = btrfs_insert_item(trans, chunk_root, &key, chunk,
-				btrfs_chunk_item_size(chunk->num_stripes));
+				btrfs_chunk_item_size(chunk_rec->num_stripes));
 	free(chunk);
 	return ret;
 }
@@ -1485,6 +1520,7 @@ static int recover_prepare(struct recover_control *rc, char *path)
 	int ret;
 	int fd;
 	struct btrfs_super_block *sb;
+	char buf[BTRFS_SUPER_INFO_SIZE];
 	struct btrfs_fs_devices *fs_devices;
 
 	ret = 0;
@@ -1494,17 +1530,11 @@ static int recover_prepare(struct recover_control *rc, char *path)
 		return -1;
 	}
 
-	sb = malloc(BTRFS_SUPER_INFO_SIZE);
-	if (!sb) {
-		fprintf(stderr, "allocating memory for sb failed.\n");
-		ret = -ENOMEM;
-		goto fail_close_fd;
-	}
-
+	sb = (struct btrfs_super_block*)buf;
 	ret = btrfs_read_dev_super(fd, sb, BTRFS_SUPER_INFO_OFFSET, 1);
 	if (ret) {
 		fprintf(stderr, "read super block error\n");
-		goto fail_free_sb;
+		goto out_close_fd;
 	}
 
 	rc->sectorsize = btrfs_super_sectorsize(sb);
@@ -1517,21 +1547,19 @@ static int recover_prepare(struct recover_control *rc, char *path)
 	if (btrfs_super_flags(sb) & BTRFS_SUPER_FLAG_SEEDING) {
 		fprintf(stderr, "this device is seed device\n");
 		ret = -1;
-		goto fail_free_sb;
+		goto out_close_fd;
 	}
 
 	ret = btrfs_scan_fs_devices(fd, path, &fs_devices, 0, 1, 0);
 	if (ret)
-		goto fail_free_sb;
+		goto out_close_fd;
 
 	rc->fs_devices = fs_devices;
 
 	if (rc->verbose)
 		print_all_devices(&rc->fs_devices->devices);
 
-fail_free_sb:
-	free(sb);
-fail_close_fd:
+out_close_fd:
 	close(fd);
 	return ret;
 }
@@ -1579,16 +1607,19 @@ static int btrfs_verify_device_extents(struct block_group_record *bg,
 				       struct list_head *devexts, int ndevexts)
 {
 	struct device_extent_record *devext;
-	u64 strpie_length;
+	u64 stripe_length;
 	int expected_num_stripes;
 
 	expected_num_stripes = calc_num_stripes(bg->flags);
 	if (expected_num_stripes && expected_num_stripes != ndevexts)
 		return 1;
 
-	strpie_length = calc_stripe_length(bg->flags, bg->offset, ndevexts);
+	if (check_num_stripes(bg->flags, ndevexts) < 0)
+		return 1;
+
+	stripe_length = calc_stripe_length(bg->flags, bg->offset, ndevexts);
 	list_for_each_entry(devext, devexts, chunk_list) {
-		if (devext->length != strpie_length)
+		if (devext->length != stripe_length)
 			return 1;
 	}
 	return 0;
@@ -2193,10 +2224,9 @@ static int btrfs_recover_chunks(struct recover_control *rc)
 		nstripes = btrfs_get_device_extents(bg->objectid,
 						    &rc->devext.no_chunk_orphans,
 						    &devexts);
-		chunk = malloc(btrfs_chunk_record_size(nstripes));
+		chunk = calloc(1, btrfs_chunk_record_size(nstripes));
 		if (!chunk)
 			return -ENOMEM;
-		memset(chunk, 0, btrfs_chunk_record_size(nstripes));
 		INIT_LIST_HEAD(&chunk->dextents);
 		chunk->bg_rec = bg;
 		chunk->cache.start = bg->objectid;
@@ -2276,7 +2306,7 @@ static void validate_rebuild_chunks(struct recover_control *rc)
 }
 
 /*
- * Return 0 when succesful, < 0 on error and > 0 if aborted by user
+ * Return 0 when successful, < 0 on error and > 0 if aborted by user
  */
 int btrfs_recover_chunk_tree(char *path, int verbose, int yes)
 {
